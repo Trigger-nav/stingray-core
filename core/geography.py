@@ -1,0 +1,138 @@
+"""Geography interface (E1) and a synthetic backing implementation.
+
+Ported from the demo's LAND/NOGO polygons and chart-layer bathymetry
+heuristic (`prototype/stingray_planner.html`). Ticket 0.3 replaces
+`SyntheticGeography` with a GSHHG/GEBCO-backed implementation behind the
+same `Geography` protocol — the optimiser and twin never depend on which
+one is in use.
+"""
+
+from __future__ import annotations
+
+import math
+from typing import Protocol
+
+# Land polygons (lat, lon) — western Mediterranean corridor, synthetic/hand-drawn.
+LAND: dict[str, list[tuple[float, float]]] = {
+    "mainland": [
+        (43.42, 6.70), (43.50, 6.95), (43.55, 7.01), (43.54, 7.13), (43.63, 7.19),
+        (43.69, 7.29), (43.72, 7.35), (43.75, 7.42), (43.78, 7.53), (43.79, 7.61),
+        (43.82, 7.78), (43.88, 8.03), (43.92, 8.15), (44.05, 8.23), (44.18, 8.40),
+        (44.31, 8.48), (44.39, 8.77), (44.40, 8.93), (44.35, 9.10), (44.30, 9.21),
+        (44.25, 9.38), (44.16, 9.65), (44.05, 9.83), (44.03, 9.99), (43.96, 10.13),
+        (43.88, 10.15), (44.5, 10.15), (44.5, 6.70),
+    ],
+    "corsica": [
+        (43.01, 9.36), (42.92, 9.34), (42.80, 9.33), (42.74, 9.29), (42.68, 9.30),
+        (42.73, 9.21), (42.68, 9.05), (42.64, 8.94), (42.59, 8.83), (42.57, 8.75),
+        (42.51, 8.66), (42.43, 8.60), (42.38, 8.55), (42.29, 8.57), (42.22, 8.55),
+        (42.13, 8.60), (42.05, 8.68), (41.98, 8.63), (41.92, 8.74), (41.88, 8.70),
+        (41.86, 8.61), (41.78, 8.68), (41.73, 8.78), (41.68, 8.90), (41.62, 8.85),
+        (41.55, 8.79), (41.48, 8.90), (41.43, 9.02), (41.39, 9.10), (41.39, 9.16),
+        (41.42, 9.22), (41.50, 9.27), (41.59, 9.33), (41.70, 9.40), (41.85, 9.41),
+        (42.00, 9.49), (42.10, 9.51), (42.30, 9.54), (42.50, 9.53), (42.70, 9.45),
+        (42.85, 9.47), (42.95, 9.46),
+    ],
+    "sardinia": [
+        (41.24, 9.14), (41.18, 9.22), (41.16, 9.31), (41.13, 9.41), (41.15, 9.53),
+        (41.11, 9.53), (41.05, 9.55), (41.00, 9.62), (40.95, 9.55), (40.92, 9.50),
+        (40.88, 9.56), (40.80, 9.65), (40.75, 9.68), (40.75, 8.13), (40.84, 8.13),
+        (40.93, 8.19), (40.96, 8.32), (40.92, 8.48), (40.92, 8.71), (40.99, 8.84),
+        (41.02, 8.93), (41.10, 9.00), (41.17, 9.06),
+    ],
+    "asinara": [(41.03, 8.25), (41.08, 8.30), (41.12, 8.33), (41.09, 8.25), (41.05, 8.22)],
+    "maddalena": [(41.20, 9.37), (41.23, 9.39), (41.24, 9.42), (41.215, 9.435), (41.19, 9.41)],
+    "capraia": [(43.08, 9.83), (43.06, 9.86), (43.02, 9.85), (43.03, 9.81)],
+    "elba_w": [(42.81, 10.10), (42.78, 10.15), (42.73, 10.15), (42.74, 10.08), (42.78, 10.06)],
+    "pianosa": [(42.36, 10.08), (42.34, 10.10), (42.33, 10.06)],
+}
+
+# Marine-reserve routing exclusions (advisory no-go, not land).
+NOGO: list[dict] = [
+    {
+        "name": "Reserve de Scandola",
+        "lat_min": 42.30,
+        "lat_max": 42.42,
+        "lon_min": 8.50,
+        "lon_max": 8.65,
+    },
+    {
+        "name": "Iles Lavezzi reserve",
+        "lat_min": 41.29,
+        "lat_max": 41.36,
+        "lon_min": 9.21,
+        "lon_max": 9.31,
+    },
+]
+
+
+def _point_in_polygon(lat: float, lon: float, poly: list[tuple[float, float]]) -> bool:
+    inside = False
+    n = len(poly)
+    j = n - 1
+    for i in range(n):
+        yi, xi = poly[i]
+        yj, xj = poly[j]
+        if ((yi > lat) != (yj > lat)) and (lon < (xj - xi) * (lat - yi) / (yj - yi) + xi):
+            inside = not inside
+        j = i
+    return inside
+
+
+def _segment_distance_nm(
+    lat: float, lon: float, a: tuple[float, float], b: tuple[float, float], klon: float
+) -> float:
+    px, py = lon * 60.0 * klon, lat * 60.0
+    ax, ay = a[1] * 60.0 * klon, a[0] * 60.0
+    bx, by = b[1] * 60.0 * klon, b[0] * 60.0
+    dx, dy = bx - ax, by - ay
+    length_sq = dx * dx + dy * dy or 1e-9
+    u = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
+    return ((px - (ax + dx * u)) ** 2 + (py - (ay + dy * u)) ** 2) ** 0.5
+
+
+class Geography(Protocol):
+    def is_navigable(self, lat_deg: float, lon_deg: float) -> bool: ...
+    def depth_m(self, lat_deg: float, lon_deg: float) -> float: ...
+
+
+class SyntheticGeography:
+    """Synthetic land/no-go/bathymetry, ported from the demo. Placeholder
+    until ticket 0.3 (GSHHG coastline + GEBCO bathymetry)."""
+
+    def __init__(self, ref_lat_deg: float = 42.3) -> None:
+        self._klon = math.cos(math.radians(ref_lat_deg))
+
+    def is_land(self, lat_deg: float, lon_deg: float) -> bool:
+        return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in LAND.values())
+
+    def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
+        return any(
+            b["lat_min"] <= lat_deg <= b["lat_max"] and b["lon_min"] <= lon_deg <= b["lon_max"]
+            for b in NOGO
+        )
+
+    def is_navigable(self, lat_deg: float, lon_deg: float) -> bool:
+        return not (self.is_land(lat_deg, lon_deg) or self.is_nogo(lat_deg, lon_deg))
+
+    def distance_to_land_nm(self, lat_deg: float, lon_deg: float) -> float:
+        best = float("inf")
+        for poly in LAND.values():
+            n = len(poly)
+            for i in range(n):
+                a, b = poly[i], poly[(i + 1) % n]
+                best = min(best, _segment_distance_nm(lat_deg, lon_deg, a, b, self._klon))
+        return best
+
+    def depth_m(self, lat_deg: float, lon_deg: float) -> float:
+        """Synthetic shelf-slope approximation, capped by regional basin
+        depths — provisional, replaced by real GEBCO bathymetry in 0.3."""
+        shelf = self.distance_to_land_nm(lat_deg, lon_deg) ** 1.25 * 95.0
+        cap = 2600.0
+        if 41.15 < lat_deg < 41.55 and 8.80 < lon_deg < 9.80:
+            cap = 110.0  # Strait of Bonifacio sill
+        elif lat_deg > 42.4 and lon_deg > 9.4:
+            cap = 480.0  # Corsican channel / Tuscan shelf
+        elif lat_deg <= 42.4 and lon_deg > 9.6:
+            cap = 1250.0  # north Tyrrhenian
+        return min(cap, max(12.0, shelf))

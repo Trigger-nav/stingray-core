@@ -72,6 +72,7 @@ Physics-informed, per-vessel, learned online. Not a black box — each component
 | Degradation (fouling, drift) | Slow-varying bias states | zero | Residual trend over weeks |
 
 - Estimation core: **Bayesian state estimation** (Kalman-family for bias states, Gaussian-process or gradient-boosted residual models for nonlinear corrections). Every prediction carries a confidence interval, surfaced in the UI.
+- **Learning pipeline:** (1) *data curation first* — steady-state segment extraction rejecting manoeuvring, transients, and tank-transfer artefacts; (2) *parametric layer* — recursive Bayesian updates of component parameters, with fast states (trim, condition-of-day) separated from slow states (fouling, engine drift — the slow state is the degradation signal); (3) *residual layer* — bounded-contribution GP/GBM on physics residuals (features: wave period, encounter angle, wind, load fraction), wide uncertainty where data is thin; (4) *fleet layer* — hierarchical priors across sister vessels so new installs start warm, computed on anonymised aggregates only. Deliberately not end-to-end ML: single-vessel data volumes are small, and interpretability + honest uncertainty are product requirements ("no invented numbers").
 - Twin outputs: fuel rate, ETA, motion/comfort indices (ISO 2631 dose), wear proxies (engine load cycling, time-at-poor-SFOC, slamming counts) for any candidate (route, speed, config, weather) tuple.
 - Retraining: onboard incremental updates continuously; full refits in cloud when connected; models versioned, signed, shipped via OTA.
 

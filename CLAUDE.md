@@ -7,6 +7,7 @@ Stingray (Stingray Marine Technology, stingraymarinetechnology.com) is a **passa
 - `PRODUCT_SPEC.md` — PRD; §4 differentiators, §11 resolved decisions
 - `TECHNICAL_ARCHITECTURE.md` — target architecture; §4 twin, §5 optimiser, §6 weather pipeline
 - `ROADMAP.md` — **current work plan; Phase 0 tickets 0.1–0.8 are the active scope**
+- `CORE_PORTING_NOTES.md` — **read before tickets 0.2/0.4/0.5**; demo shortcuts that must not be ported, conventions (units, weather schema), acceptance criteria
 - `BUSINESS_CASE.md` — market/pricing context
 - `prototype/` — deployed HTML demo (github.com → trigger-nav.github.io/stingray-demo). Its `<script id="core">` block contains the validated v0 twin + DP optimiser to port in ticket 0.2. Treat as reference, not production code.
 

@@ -1,0 +1,108 @@
+import pytest
+
+from core.corridors import corridor_east, corridor_west
+from core.geography import SyntheticGeography
+from core.optimiser import PlanRequest, _dp_route, optimise
+from core.twin import VesselTwin
+from core.units import kn_to_ms
+from core.vessel_spec import VesselSpec
+from core.weather import SyntheticWeatherField, WeatherSample
+from core.weights import combine_weights, weights_from_mission
+
+DEFAULT_SPEC_PATH = "data/vessel_specs/mys_50m_default.yaml"
+
+
+@pytest.fixture
+def vessel():
+    return VesselSpec.from_yaml(DEFAULT_SPEC_PATH)
+
+
+@pytest.fixture
+def geo():
+    return SyntheticGeography()
+
+
+def test_mistral_high_comfort_routes_lee_side(vessel, geo):
+    wx = SyntheticWeatherField("mistral")
+    result = optimise(PlanRequest(weather=wx, geography=geo, vessel=vessel, pace=0, comfort=100))
+    assert result.candidates[0].side == "E"
+
+
+def test_calm_corridors_converge_and_speed_varies_by_pace(vessel, geo):
+    wx = SyntheticWeatherField("calm")
+    economy = optimise(PlanRequest(weather=wx, geography=geo, vessel=vessel, pace=0, comfort=50))
+    schedule = optimise(PlanRequest(weather=wx, geography=geo, vessel=vessel, pace=100, comfort=50))
+
+    economy_best = min(economy.candidates, key=lambda c: c.score_eur)
+    schedule_best = min(schedule.candidates, key=lambda c: c.score_eur)
+    assert schedule_best.speed_kn > economy_best.speed_kn
+
+    # corridors "converge": in calm weather, both sides should appear
+    # somewhere in a wide-enough candidate pool (no weather-driven bias).
+    all_sides = {c.side for c in economy.candidates} | {c.side for c in schedule.candidates}
+    assert all_sides == {"W", "E"}
+
+
+def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):
+    wx = SyntheticWeatherField("calm")
+    result = optimise(
+        PlanRequest(
+            weather=wx, geography=geo, vessel=vessel, pace=50, comfort=50, latest_arrival_h=0.5
+        )
+    )
+    assert result.missed_window is True
+    durations = [c.duration_h for c in result.candidates]
+    assert durations == sorted(durations)
+
+
+class _ConstantRoughHeadSeas:
+    """Rough enough, and opposed enough to the corridor headings (wave_from
+    chosen so most legs land encounter angle > 140 on both corridors — see
+    the ticket 0.2 plan's B5 test), to trigger the slamming hard constraint
+    at higher speeds while staying feasible at lower ones."""
+
+    def __init__(self, hs_m: float):
+        self.hs_m = hs_m
+
+    def sample(self, lat_deg, lon_deg, t_h):
+        return WeatherSample(
+            hs_m=self.hs_m,
+            period_peak_s=6.5,
+            period_mean_s=5.2,
+            wave_from_deg=330.0,
+            wind_u_ms=0.0,
+            wind_v_ms=0.0,
+            current_u_ms=0.0,
+            current_v_ms=0.0,
+        )
+
+
+def test_slamming_speed_is_pruned_outright_not_downranked(vessel, geo):
+    """B5: at a speed/sea-state combination that triggers slamming, the DP
+    must return infeasible (None) for that speed — pruned outright, not
+    merely scored worse than an alternative. Checked directly against
+    `_dp_route`, below the diversity-filtered top-3 `optimise()` returns,
+    since a speed absent from the top-3 could just mean it scored worse."""
+    twin = VesselTwin(vessel)
+    weights = combine_weights(weights_from_mission(pace=100, comfort=0), vessel.wear_policy)
+    rough = _ConstantRoughHeadSeas(hs_m=vessel.wear_policy.slamming_hs_threshold_m + 1.5)
+    calm = _ConstantRoughHeadSeas(hs_m=0.3)
+    # 16 kn: comfortably under the engine-load hard constraint in calm seas
+    # (so any pruning at this speed is attributable to slamming, not
+    # overload), and above the slamming minimum speed.
+    fast_kn = 16.0
+
+    for corridor_fn in (corridor_west, corridor_east):
+        corridor = corridor_fn()
+        infeasible_in_rough_seas = _dp_route(
+            corridor, kn_to_ms(fast_kn), fast_kn, 2, rough, geo, twin, weights, 0.0
+        )
+        feasible_in_calm_seas = _dp_route(
+            corridor, kn_to_ms(fast_kn), fast_kn, 2, calm, geo, twin, weights, 0.0
+        )
+        assert infeasible_in_rough_seas is None
+        assert feasible_in_calm_seas is not None
+
+    # and it should be genuinely absent from the top-level candidate pool too
+    result = optimise(PlanRequest(weather=rough, geography=geo, vessel=vessel, pace=100, comfort=0))
+    assert all(c.speed_kn != fast_kn for c in result.candidates)

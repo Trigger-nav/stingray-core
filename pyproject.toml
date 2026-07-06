@@ -7,7 +7,10 @@ name = "stingray"
 version = "0.1.0"
 description = "Stingray passage & performance optimisation core"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = [
+    "numpy>=1.26",
+    "PyYAML>=6.0",
+]
 
 [project.optional-dependencies]
 dev = [

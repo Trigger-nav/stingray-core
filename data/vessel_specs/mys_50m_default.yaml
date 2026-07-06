@@ -1,0 +1,80 @@
+# Synthetic default vessel spec: 50m displacement motoryacht, twin screw.
+# Every numeric value here is a provisional placeholder shaped to match
+# CORE_PORTING_NOTES.md (A1-A3), not a fitted parameter — sea-trial fitting
+# with naval-architecture priors is ticket 0.6. Internal units are SI
+# throughout (B1); knot-equivalents are noted in comments for readability.
+
+name: "MY 50m displacement (default synthetic)"
+provisional: true
+
+hull:
+  length_wl_m: 45.0
+  beam_wl_m: 9.0
+  block_coefficient: 0.52
+
+# Calm-water power vs Froude number (A1): power = (linear*v^2 + cubic*v^3)
+# * (1 + steepening_coefficient * (Fn/hull_speed_froude)^steepening_exponent).
+# hull_speed_froude=0.40 puts the steepening onset at ~16-17 kn for this
+# waterline length, matching the ticket's stated hull-speed range.
+calm_resistance:
+  linear_coefficient: 5.0    # kW per (m/s)^2
+  cubic_coefficient: 1.0     # kW per (m/s)^3
+  steepening_coefficient: 1.5
+  steepening_exponent: 4.0
+  hull_speed_froude: 0.40
+
+# Additive, period-conditioned added resistance (A2), STAWAVE-class shape:
+# R_aw = scale * rho * g * hs^2 * (beam^2/length_wl) * period_response * angle_factor
+added_resistance:
+  scale: 0.4
+  period_reference_s: 7.5   # peak response period placeholder
+  head_factor: 1.0
+  following_factor: 0.25
+
+# Per-engine fuel map (A3): SFOC = base * (1 + curvature*(load_fraction -
+# min_load_fraction)^2), g/kWh. Single- vs twin-engine choice must emerge
+# from evaluating both configs against this map, never be asserted.
+engines:
+  - name: port
+    mcr_kw: 1350.0
+    sfoc_base_g_per_kwh: 195.0
+    sfoc_min_load_fraction: 0.75
+    sfoc_curvature: 2.0
+  - name: starboard
+    mcr_kw: 1350.0
+    sfoc_base_g_per_kwh: 195.0
+    sfoc_min_load_fraction: 0.75
+    sfoc_curvature: 2.0
+
+hotel_load_fuel_kg_per_h: 36.0   # gensets + hotel load, flat (matches demo's simplification)
+fuel_density_kg_per_l: 0.85      # marine diesel, API-boundary conversion only (B1)
+co2_per_kg_fuel: 3.15            # kg CO2 per kg diesel fuel (combustion factor)
+
+# Motion/comfort heuristic (ported shape, period-extended):
+# comfort_rate = scale * hs^hs_exponent * beam_response * period_factor * speed_factor
+# beam_response = beam_base + beam_amplitude*sin(encounter)^2 (+head_bonus if enc>threshold)
+# speed_factor = speed_base + v_kn/speed_scale_kn
+comfort:
+  scale: 1.0
+  hs_exponent: 1.7
+  beam_base: 0.35
+  beam_amplitude: 0.91
+  head_bonus: 0.25
+  head_bonus_threshold_deg: 150.0
+  period_reference_s: 6.5
+  speed_base: 0.5
+  speed_scale_kn: 22.0
+
+# Per-vessel machinery-care policy (B5) - replaces the demo's wear slider.
+# weight_eur_equivalent scores wear under every plan; the two thresholds
+# below are hard constraints (pruned, same mechanism as A5 land/no-go).
+wear_policy:
+  weight_eur_equivalent: 9.0
+  max_continuous_load_fraction: 0.85
+  slamming_hs_threshold_m: 1.8
+  slamming_min_speed_ms: 6.69   # ~13 kn
+  slamming_encounter_angle_deg: 140.0
+  load_wear_scale: 1.2
+  slam_wear_scale: 3.0
+  single_engine_wear_bonus: 0.15
+  load_cycling_limit: null      # accepted, unenforced until ticket 0.4 (see plan)
