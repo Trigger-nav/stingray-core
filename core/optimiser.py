@@ -59,6 +59,7 @@ the request's origin/destination match that pair, not for an arbitrary A→B.
 from __future__ import annotations
 
 import heapq
+import math
 from dataclasses import dataclass
 
 from core.corridors import PORTS, REF_LAT_DEG, Corridor, corridor_east, corridor_west, offset_point
@@ -72,10 +73,70 @@ from core.vessel_spec import VesselSpec
 from core.weather import WeatherField
 from core.weights import Weights, combine_weights, weights_from_mission
 
-DEFAULT_SPEEDS_KN: tuple[float, ...] = (10, 11, 12, 13, 14, 15, 16, 17)
 BASELINE_SPEED_KN = 14.0
 DEFAULT_TIME_BUCKET_H = 1.0
 DEFAULT_HORIZON_H = 48.0
+
+# Fixed speed grid for tests that exercise the search mechanism directly
+# (bypassing `PlanRequest`/`optimise()`, which now derive candidate speeds
+# per-vessel — see `feasible_speeds_kn` below). NOT a sensible default for
+# an arbitrary vessel: it was retired as one after review found the shipped
+# default 50m spec calm-water-overloads *both* engine configs at 17kn (see
+# CORE_PORTING_NOTES.md and CLAUDE.md's Bonifacio gotcha) — a fixed global
+# guess silently offered a speed no engine config could ever sustain.
+TEST_SPEEDS_KN: tuple[float, ...] = (10, 11, 12, 13, 14, 15, 16, 17)
+
+# Candidate speed grid floor/step (B6-adjacent follow-up: the *ceiling* is
+# derived per-vessel from the feasible load envelope below; the floor isn't
+# — low speed is essentially never load-constrained in this power model
+# (required power falls monotonically as speed drops), so there's no
+# equivalent physics to derive a floor from. Clamped to the ceiling for a
+# pathologically slow vessel spec so the grid never inverts.
+MIN_CANDIDATE_SPEED_KN = 6.0
+SPEED_STEP_KN = 1.0
+
+
+def _max_continuous_speed_kn(vessel: VesselSpec, active_engines: int) -> float:
+    """The fastest calm-water speed at which this engine config's per-engine
+    load fraction stays within `wear_policy.max_continuous_load_fraction`
+    (B5) — the vessel's actual physical ceiling for this config, not a
+    guessed constant. Calm water is the *most* permissive sea state (added
+    resistance only ever raises required power for a given speed), so this
+    is an upper bound the per-leg overload prune (`core/legs.py` via
+    `evaluate_leg`) only ever tightens in real conditions, never loosens —
+    safe to use as the top of the candidate grid.
+
+    Binary search rather than a closed-form solve: `calm_power_kw`'s
+    Froude-steepening term isn't algebraically invertible, and 30 halvings
+    over a 0-40kn bracket is priced in cents of runtime, computed once per
+    `optimise()` call, not per edge."""
+    lo, hi = 0.0, 40.0  # kn; comfortably above any plausible motoryacht speed
+    max_load = vessel.wear_policy.max_continuous_load_fraction
+    mcr_kw = min(e.mcr_kw for e in vessel.engines[:active_engines])
+    for _ in range(30):
+        mid = (lo + hi) / 2
+        power_per_engine_kw = calm_power_kw(kn_to_ms(mid), vessel) / active_engines
+        if power_per_engine_kw / mcr_kw > max_load:
+            hi = mid
+        else:
+            lo = mid
+    return lo
+
+
+def feasible_speeds_kn(vessel: VesselSpec) -> tuple[float, ...]:
+    """Candidate speed grid derived from the vessel's own feasible load
+    envelope (B5), replacing the fixed `TEST_SPEEDS_KN` guess as
+    `PlanRequest`'s default. Ceiling = the fastest engine config's max
+    continuous speed (more engines online sustains a higher speed, so this
+    is `_max_continuous_speed_kn` maximised over engine config — slower
+    configs are still tried per-leg by the search as usual, they just don't
+    extend the grid past their own lower ceiling)."""
+    engine_configs = range(1, len(vessel.engines) + 1)
+    ceiling_kn = max(_max_continuous_speed_kn(vessel, n) for n in engine_configs)
+    floor_kn = min(MIN_CANDIDATE_SPEED_KN, ceiling_kn)
+    n_steps = math.floor((ceiling_kn - floor_kn) / SPEED_STEP_KN)
+    return tuple(floor_kn + i * SPEED_STEP_KN for i in range(n_steps + 1))
+
 
 # Legacy default endpoints (B6: not to be deepened as global constants —
 # this is the one place they're allowed to live on as a default, for
@@ -124,7 +185,13 @@ class PlanRequest:
     destination_is_anchorage: bool = False
     latest_arrival_h: float | None = None
     departure_t0_h: float = 0.0
-    speeds_kn: tuple[float, ...] = DEFAULT_SPEEDS_KN
+    # None -> `optimise()` derives the grid from `vessel` via
+    # `feasible_speeds_kn`; a dataclass default can't call a vessel-dependent
+    # function, so None is the sentinel for "use the vessel's envelope."
+    # Callers that pass an explicit tuple (existing hard-constraint tests
+    # that deliberately include an overload speed to prove it gets pruned,
+    # for instance) bypass the envelope entirely, same as before.
+    speeds_kn: tuple[float, ...] | None = None
 
     def __post_init__(self) -> None:
         _validate_endpoint(self.origin, self.geography, self.origin_is_anchorage, "origin")
@@ -170,12 +237,30 @@ class Candidate:
 
 
 @dataclass(frozen=True)
+class PruneDiagnostic:
+    """Machine-readable explanation for an option that's absent from the
+    result — a caller (bridge UI, reasoning-sentence generator, support
+    debugging a "why don't I see X" question) can render `message` directly
+    or branch on `code`/the structured fields without parsing prose. Not a
+    log of every individual leg-level A5/B5 prune (that's per-edge and huge,
+    `evaluate_leg`'s job); this is pool-level: whole speeds, engine configs,
+    or route sides that end up with zero surviving candidates."""
+
+    code: str
+    message: str
+    side: str | None = None
+    speed_kn: float | None = None
+    active_engines: int | None = None
+
+
+@dataclass(frozen=True)
 class PlanResult:
     candidates: tuple[Candidate, ...]
     baseline: Candidate
     weights: Weights
     missed_window: bool
     baseline_provisional: bool = True
+    diagnostics: tuple[PruneDiagnostic, ...] = ()
 
 
 def _route_signature(track: tuple[LatLon, ...]) -> str:
@@ -669,11 +754,46 @@ def _candidate_from_result(
     )
 
 
+def _speed_envelope_diagnostics(
+    vessel: VesselSpec, speeds_kn: tuple[float, ...], engine_configs: tuple[int, ...]
+) -> list[PruneDiagnostic]:
+    """Flag any engine config that offers *zero* usable speeds in the grid
+    actually searched — i.e. its own calm-water load ceiling
+    (`_max_continuous_speed_kn`) falls below the grid's slowest candidate.
+    Doesn't fire for the shipped default spec (its 1-engine ceiling is well
+    above the floor); exists for vessel specs where it can (a small/weak
+    single engine relative to twin-engine cruising range)."""
+    if not speeds_kn:
+        return []
+    floor_kn = min(speeds_kn)
+    diagnostics = []
+    for active_engines in engine_configs:
+        ceiling_kn = _max_continuous_speed_kn(vessel, active_engines)
+        if ceiling_kn < floor_kn:
+            diagnostics.append(
+                PruneDiagnostic(
+                    code="engine_config_below_speed_floor",
+                    message=(
+                        f"{active_engines}-engine running offers no usable speed in this plan: "
+                        f"its calm-water continuous-load ceiling ({ceiling_kn:.1f}kn) is below "
+                        f"the candidate speed grid's floor ({floor_kn:.1f}kn)."
+                    ),
+                    speed_kn=ceiling_kn,
+                    active_engines=active_engines,
+                )
+            )
+    return diagnostics
+
+
 def optimise(request: PlanRequest) -> PlanResult:
     twin = VesselTwin(request.vessel)
     mission_weights = weights_from_mission(request.pace, request.comfort)
     weights = combine_weights(mission_weights, request.vessel.wear_policy)
     engine_configs = tuple(range(1, len(request.vessel.engines) + 1))
+    speeds_kn = (
+        request.speeds_kn if request.speeds_kn is not None else feasible_speeds_kn(request.vessel)
+    )
+    diagnostics = _speed_envelope_diagnostics(request.vessel, speeds_kn, engine_configs)
 
     candidates_all: list[Candidate] = []
 
@@ -687,7 +807,7 @@ def optimise(request: PlanRequest) -> PlanResult:
         request.weather,
         request.geography,
         twin,
-        request.speeds_kn,
+        speeds_kn,
         engine_configs,
         request.departure_t0_h,
         horizon_h,
@@ -708,7 +828,7 @@ def optimise(request: PlanRequest) -> PlanResult:
             request.weather,
             request.geography,
             twin,
-            request.speeds_kn,
+            speeds_kn,
             engine_configs,
             request.departure_t0_h,
             DEFAULT_HORIZON_H,
@@ -723,7 +843,7 @@ def optimise(request: PlanRequest) -> PlanResult:
         twin,
         request.vessel,
         weights,
-        request.speeds_kn,
+        speeds_kn,
         engine_configs,
         request.departure_t0_h,
     )
@@ -752,7 +872,7 @@ def optimise(request: PlanRequest) -> PlanResult:
             twin,
             request.vessel,
             weights,
-            request.speeds_kn,
+            speeds_kn,
             engine_configs,
             request.departure_t0_h,
             lane_filter=opposite_filter,
@@ -768,6 +888,28 @@ def optimise(request: PlanRequest) -> PlanResult:
                     request.latest_arrival_h,
                 )
             )
+        else:
+            # The opposite-side lattice search either found nothing at all,
+            # or converged back onto the same side (both read as "no diverse
+            # option there") — previously silently dropped. Concrete case
+            # this exists for: Bonifacio Strait isn't threadable by the
+            # lattice at its current 5nm lane spacing (ROADMAP.md ticket
+            # 0.8 note), so every plan on this passage is currently E-side
+            # only, with nothing telling the caller why the W option never
+            # shows up.
+            missing_side = "W" if primary["side"] == "E" else "E"
+            diagnostics.append(
+                PruneDiagnostic(
+                    code="route_side_unreachable",
+                    message=(
+                        f"No feasible {missing_side}-side route found at the current lattice "
+                        f"resolution (cross-track step {lattice.cross_track_step_nm:.0f}nm, "
+                        f"+-{LANE_TURN_RATE} lanes/stage) — see ROADMAP.md ticket 0.8's fine "
+                        f"lattice refinement note."
+                    ),
+                    side=missing_side,
+                )
+            )
 
     # --- Ticket 0.2: corridor DP grid — Med-specific hand-drawn waypoints
     # (B6/ROADMAP.md "Beyond Phase 2"), only meaningful for the exact
@@ -781,7 +923,7 @@ def optimise(request: PlanRequest) -> PlanResult:
     if request.origin == DEFAULT_ORIGIN and request.destination == DEFAULT_DESTINATION:
         for corridor_fn in (corridor_west, corridor_east):
             corridor = corridor_fn()
-            for speed_kn in request.speeds_kn:
+            for speed_kn in speeds_kn:
                 stw_ms = kn_to_ms(speed_kn)
                 for active_engines in engine_configs:
                     result = _dp_route(
@@ -832,6 +974,18 @@ def optimise(request: PlanRequest) -> PlanResult:
         else:
             missed_window = True
             pool = sorted(candidates_all, key=lambda c: c.duration_h)[:4]
+            if candidates_all:
+                fastest = min(c.duration_h for c in candidates_all)
+                diagnostics.append(
+                    PruneDiagnostic(
+                        code="eta_window_infeasible",
+                        message=(
+                            f"Requested arrival within {request.latest_arrival_h:.1f}h isn't "
+                            f"achievable by any candidate; fastest feasible option found is "
+                            f"{fastest:.1f}h."
+                        ),
+                    )
+                )
     else:
         pool = list(candidates_all)
 
@@ -856,5 +1010,9 @@ def optimise(request: PlanRequest) -> PlanResult:
     )
 
     return PlanResult(
-        candidates=tuple(picks), baseline=baseline, weights=weights, missed_window=missed_window
+        candidates=tuple(picks),
+        baseline=baseline,
+        weights=weights,
+        missed_window=missed_window,
+        diagnostics=tuple(diagnostics),
     )

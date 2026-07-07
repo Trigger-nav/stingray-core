@@ -3,7 +3,14 @@ import pytest
 from core.corridors import PORTS, corridor_east, corridor_west
 from core.geography import RealGeography, SyntheticGeography
 from core.isochrone import time_optimal_route
-from core.optimiser import DEFAULT_SPEEDS_KN, PlanRequest, _dp_route, build_lattice, optimise
+from core.optimiser import (
+    TEST_SPEEDS_KN,
+    PlanRequest,
+    _dp_route,
+    build_lattice,
+    feasible_speeds_kn,
+    optimise,
+)
 from core.twin import VesselTwin
 from core.units import distance_m, interpolate_point, kn_to_ms, m_to_nm
 from core.vessel_spec import VesselSpec
@@ -110,7 +117,7 @@ def test_pure_schedule_weights_converge_to_isochrone_time_optimal(vessel, geo):
 
     twin = VesselTwin(vessel)
     lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
-    oracle = time_optimal_route(lattice, wx, geo, twin, DEFAULT_SPEEDS_KN, (1, 2), 0.0)
+    oracle = time_optimal_route(lattice, wx, geo, twin, TEST_SPEEDS_KN, (1, 2), 0.0)
     assert oracle is not None
     _, oracle_duration_h = oracle
 
@@ -127,6 +134,54 @@ def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):
     assert result.missed_window is True
     durations = [c.duration_h for c in result.candidates]
     assert durations == sorted(durations)
+
+
+def test_charter_window_infeasible_reflects_vessel_envelope_not_an_arbitrary_number(
+    vessel, real_geo
+):
+    """Charter-window regression, grounded in real physics rather than an
+    arbitrary too-small number (the 0.5h case above): against
+    `RealGeography`, a window tighter than the vessel's own envelope-capped
+    fastest passage (`feasible_speeds_kn`'s ceiling, ~16kn on this spec —
+    see `test_optimiser_constraints.py`) must still come back flagged and
+    fastest-first, and every returned candidate must respect that ceiling —
+    the search isn't quietly reaching for a speed the vessel can't
+    sustain to try to satisfy an impossible window."""
+    wx = SyntheticWeatherField("calm")
+    ceiling_kn = max(feasible_speeds_kn(vessel))
+    result = optimise(
+        PlanRequest(
+            weather=wx,
+            geography=real_geo,
+            vessel=vessel,
+            pace=100,
+            comfort=0,
+            latest_arrival_h=13.5,  # tighter than the fastest achievable at this ceiling
+        )
+    )
+    assert result.missed_window is True
+    assert any(d.code == "eta_window_infeasible" for d in result.diagnostics)
+    durations = [c.duration_h for c in result.candidates]
+    assert durations == sorted(durations)
+    assert all(c.speed_kn <= ceiling_kn for c in result.candidates)
+
+
+def test_bonifacio_unreachable_at_current_lattice_resolution_is_diagnosed(vessel, real_geo):
+    """ROADMAP.md ticket 0.8 finding: the open lattice can't thread the real
+    Bonifacio Strait / Iles Lavezzi channel at its current 5nm lane spacing,
+    so every plan on this passage currently goes east-about only — this
+    used to be silent (see CLAUDE.md's Bonifacio gotcha). A generous,
+    perfectly achievable window (so this isn't conflated with the
+    ETA-window-infeasible case above) should still surface a machine-
+    readable diagnostic explaining the missing W-side option, not just
+    quietly return only E-side candidates."""
+    wx = SyntheticWeatherField("calm")
+    result = optimise(
+        PlanRequest(weather=wx, geography=real_geo, vessel=vessel, pace=50, comfort=50)
+    )
+    assert result.missed_window is False
+    assert {c.side for c in result.candidates} == {"E"}
+    assert any(d.code == "route_side_unreachable" and d.side == "W" for d in result.diagnostics)
 
 
 class _ConstantRoughHeadSeas:

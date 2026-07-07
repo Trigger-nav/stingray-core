@@ -22,7 +22,7 @@ Goal: from the current demo (validated UX + optimiser shape, synthetic everythin
 | 0.5 | GRIB pipeline in production: NOMADS + ECMWF open data, cfgrib parsing, scheduled | Extends `ingest/fetch_grib_nomads.py` |
 | 0.6 | Twin v1 offline: parametric components, fit/validate tooling | Naval-arch consult engaged here |
 | 0.7 | **Savings-verification methodology** (counterfactual baseline maths, written + reviewed) | The sales claim depends on this; agree it before any pilot |
-| 0.8 | Routing safety constraints: min depth, TSS, no-go polygons from chart data | Advisory-only posture still requires sane routes |
+| 0.8 | Routing safety constraints: min depth, TSS, no-go polygons from chart data **+ fine lattice refinement (adaptive resolution) near tight constraints** | Advisory-only posture still requires sane routes. **0.4 re-review finding:** chart data alone won't be enough at Bonifacio — the open lattice can't thread the real ~3nm Lavezzi–Sardinia channel at the current 5nm lane spacing either, so every plan currently detours east-about (+~20nm), which is safe but silently forecloses tight ETA windows a strait transit would meet. Needs adaptive/local lattice refinement near narrow constrained passages, not just no-go polygon data. See `CLAUDE.md`'s Bonifacio gotcha. |
 
 ## Phase 1 — Real data (weeks 6–16, overlaps Phase 0)
 

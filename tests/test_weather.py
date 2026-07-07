@@ -30,19 +30,31 @@ def _uniform_grid(nt, nlat, nlon, value):
 def test_gridded_interior_point_blends_valid_neighbours():
     nlat, nlon = 3, 3
     hs = np.array(
-        [[
-            [1.0, 1.2, 1.4],
-            [1.1, 1.3, np.nan],
-            [1.2, 1.4, 1.6],
-        ]]
+        [
+            [
+                [1.0, 1.2, 1.4],
+                [1.1, 1.3, np.nan],
+                [1.2, 1.4, 1.6],
+            ]
+        ]
     )
     other = _uniform_grid(1, nlat, nlon, 6.0)
     wave_dir = _uniform_grid(1, nlat, nlon, 0.0)
     zeros = _uniform_grid(1, nlat, nlon, 0.0)
     field = GriddedWeatherField(
-        lat0_deg=41.0, dlat_deg=1.0, lon0_deg=8.0, dlon_deg=1.0, hours=[0.0],
-        hs_m=hs, period_peak_s=other, period_mean_s=other, wave_from_deg=wave_dir,
-        wind_u_ms=zeros, wind_v_ms=zeros, current_u_ms=zeros, current_v_ms=zeros,
+        lat0_deg=41.0,
+        dlat_deg=1.0,
+        lon0_deg=8.0,
+        dlon_deg=1.0,
+        hours=[0.0],
+        hs_m=hs,
+        period_peak_s=other,
+        period_mean_s=other,
+        wave_from_deg=wave_dir,
+        wind_u_ms=zeros,
+        wind_v_ms=zeros,
+        current_u_ms=zeros,
+        current_v_ms=zeros,
     )
     s = field.sample(41.5, 8.5, 0.0)
     assert not s.is_missing
@@ -52,19 +64,31 @@ def test_gridded_interior_point_blends_valid_neighbours():
 def test_gridded_land_adjacent_point_is_missing_not_calm():
     nlat, nlon = 3, 3
     hs = np.array(
-        [[
-            [1.0, 1.2, 1.4],
-            [1.1, 1.3, np.nan],
-            [1.2, 1.4, 1.6],
-        ]]
+        [
+            [
+                [1.0, 1.2, 1.4],
+                [1.1, 1.3, np.nan],
+                [1.2, 1.4, 1.6],
+            ]
+        ]
     )
     other = _uniform_grid(1, nlat, nlon, 6.0)
     wave_dir = _uniform_grid(1, nlat, nlon, 0.0)
     zeros = _uniform_grid(1, nlat, nlon, 0.0)
     field = GriddedWeatherField(
-        lat0_deg=41.0, dlat_deg=1.0, lon0_deg=8.0, dlon_deg=1.0, hours=[0.0],
-        hs_m=hs, period_peak_s=other, period_mean_s=other, wave_from_deg=wave_dir,
-        wind_u_ms=zeros, wind_v_ms=zeros, current_u_ms=zeros, current_v_ms=zeros,
+        lat0_deg=41.0,
+        dlat_deg=1.0,
+        lon0_deg=8.0,
+        dlon_deg=1.0,
+        hours=[0.0],
+        hs_m=hs,
+        period_peak_s=other,
+        period_mean_s=other,
+        wave_from_deg=wave_dir,
+        wind_u_ms=zeros,
+        wind_v_ms=zeros,
+        current_u_ms=zeros,
+        current_v_ms=zeros,
     )
     s = field.sample(42.5, 9.5, 0.0)
     assert s.is_missing
@@ -79,9 +103,19 @@ def test_gridded_direction_interpolates_via_vectors_across_wrap():
     zeros = _uniform_grid(1, 2, 2, 0.0)
     wave_from = np.array([[[350.0, 10.0], [350.0, 10.0]]])
     field = GriddedWeatherField(
-        lat0_deg=42.0, dlat_deg=1.0, lon0_deg=8.0, dlon_deg=1.0, hours=[0.0],
-        hs_m=hs, period_peak_s=other, period_mean_s=other, wave_from_deg=wave_from,
-        wind_u_ms=zeros, wind_v_ms=zeros, current_u_ms=zeros, current_v_ms=zeros,
+        lat0_deg=42.0,
+        dlat_deg=1.0,
+        lon0_deg=8.0,
+        dlon_deg=1.0,
+        hours=[0.0],
+        hs_m=hs,
+        period_peak_s=other,
+        period_mean_s=other,
+        wave_from_deg=wave_from,
+        wind_u_ms=zeros,
+        wind_v_ms=zeros,
+        current_u_ms=zeros,
+        current_v_ms=zeros,
     )
     s = field.sample(42.5, 8.5, 0.0)
     # vector average of 350 deg and 10 deg should land near 0 deg, NOT the
@@ -98,9 +132,19 @@ def test_gridded_time_interpolation_is_linear():
     wave_dir = _uniform_grid(2, 2, 2, 0.0)
     zeros = _uniform_grid(2, 2, 2, 0.0)
     field = GriddedWeatherField(
-        lat0_deg=42.0, dlat_deg=1.0, lon0_deg=8.0, dlon_deg=1.0, hours=[0.0, 2.0],
-        hs_m=hs, period_peak_s=other, period_mean_s=other, wave_from_deg=wave_dir,
-        wind_u_ms=zeros, wind_v_ms=zeros, current_u_ms=zeros, current_v_ms=zeros,
+        lat0_deg=42.0,
+        dlat_deg=1.0,
+        lon0_deg=8.0,
+        dlon_deg=1.0,
+        hours=[0.0, 2.0],
+        hs_m=hs,
+        period_peak_s=other,
+        period_mean_s=other,
+        wave_from_deg=wave_dir,
+        wind_u_ms=zeros,
+        wind_v_ms=zeros,
+        current_u_ms=zeros,
+        current_v_ms=zeros,
     )
     s = field.sample(42.0, 8.0, 1.0)
     assert s.hs_m == pytest.approx(2.0)

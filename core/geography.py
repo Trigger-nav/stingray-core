@@ -45,6 +45,7 @@ class OutOfOperatingAreaError(ValueError):
     real data doesn't exist there, so silently returning "not land"/a
     clamped depth would be misleading rather than merely imprecise."""
 
+
 # Land polygons (lat, lon) — western Mediterranean corridor, synthetic/hand-drawn.
 LAND: dict[str, list[tuple[float, float]]] = {
     "mainland": [

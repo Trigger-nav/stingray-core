@@ -3,11 +3,14 @@ import pytest
 from core.corridors import PORTS, corridor_west
 from core.geography import SyntheticGeography
 from core.optimiser import (
-    DEFAULT_SPEEDS_KN,
+    SPEED_STEP_KN,
+    TEST_SPEEDS_KN,
     PlanRequest,
     _dp_route,
     _lattice_route_result,
+    _max_continuous_speed_kn,
     build_lattice,
+    feasible_speeds_kn,
     optimise,
 )
 from core.twin import VesselTwin
@@ -97,7 +100,7 @@ def test_a4_cross_current_appears_in_cts_via_lattice_search(vessel, geo):
     cross_current = _CurrentField(2.0, 0.0)
 
     result = _lattice_route_result(
-        lattice, None, cross_current, geo, twin, vessel, weights, DEFAULT_SPEEDS_KN, (1, 2), 0.0
+        lattice, None, cross_current, geo, twin, vessel, weights, TEST_SPEEDS_KN, (1, 2), 0.0
     )
     assert result is not None
     assert any(lt.cts_deg != pytest.approx(lt.course_deg) for lt in result["leg_targets"])
@@ -130,7 +133,7 @@ def test_a5_lattice_search_never_crosses_land_or_nogo(vessel, geo):
             weights_from_mission(pace=pace, comfort=comfort), vessel.wear_policy
         )
         result = _lattice_route_result(
-            lattice, None, wx, geo, twin, vessel, weights, DEFAULT_SPEEDS_KN, (1, 2), 0.0
+            lattice, None, wx, geo, twin, vessel, weights, TEST_SPEEDS_KN, (1, 2), 0.0
         )
         assert result is not None
         for point in result["track"]:
@@ -160,11 +163,46 @@ def test_b5_lattice_search_prunes_overload_speed_entirely(vessel, geo):
 
 def test_b5_overload_speed_is_pruned_regardless_of_pace(vessel, geo):
     """An engine-overload speed (per VesselSpec.wear_policy.max_continuous_load_fraction)
-    must be pruned even at maximum schedule pressure (Pace=100)."""
+    must be pruned even at maximum schedule pressure (Pace=100). Explicitly
+    overrides `speeds_kn` to force the search to actually try the overload
+    speed: since ticket 0.4's review, `optimise()`'s *default* grid
+    (`feasible_speeds_kn`) already excludes it (see
+    `test_default_speed_grid_excludes_the_calm_water_overload_speed` below),
+    so leaving the default in place would make this pass vacuously without
+    exercising the pruning mechanism at all."""
     wx = SyntheticWeatherField("calm")
     overload_kn = 17.0  # see test_optimiser_regression: ~107% MCR at this vessel spec
     for pace in (0, 50, 100):
         result = optimise(
-            PlanRequest(weather=wx, geography=geo, vessel=vessel, pace=pace, comfort=0)
+            PlanRequest(
+                weather=wx,
+                geography=geo,
+                vessel=vessel,
+                pace=pace,
+                comfort=0,
+                speeds_kn=(14.0, 16.0, overload_kn),
+            )
         )
         assert all(c.speed_kn != overload_kn for c in result.candidates)
+
+
+def test_default_speed_grid_excludes_the_calm_water_overload_speed(vessel):
+    """B6 follow-up: the candidate speed grid `optimise()` uses by default
+    is derived from the vessel's own feasible load envelope
+    (`feasible_speeds_kn`), not the retired fixed `TEST_SPEEDS_KN` guess —
+    so a speed that's calm-water engine-overloaded on every config (17kn,
+    ~107% MCR at 2 engines on this vessel spec) should never even be
+    offered as a candidate, not merely lose to pruning inside the search."""
+    speeds = feasible_speeds_kn(vessel)
+    assert 17.0 not in speeds
+    assert max(speeds) < 17.0
+
+
+def test_feasible_speeds_ceiling_matches_the_twin_physics(vessel):
+    """The grid's top speed should sit just under the 2-engine calm-water
+    continuous-load ceiling (the fastest config sets the grid's ceiling —
+    see `feasible_speeds_kn`'s docstring), not at some unrelated constant."""
+    ceiling_kn = _max_continuous_speed_kn(vessel, active_engines=2)
+    speeds = feasible_speeds_kn(vessel)
+    assert max(speeds) <= ceiling_kn
+    assert ceiling_kn - max(speeds) < SPEED_STEP_KN
