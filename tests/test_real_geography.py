@@ -1,6 +1,8 @@
+import random
+
 import pytest
 
-from core.geography import RealGeography
+from core.geography import OPERATING_AREA_BBOX, OutOfOperatingAreaError, RealGeography
 
 
 @pytest.fixture(scope="module")
@@ -46,3 +48,42 @@ def test_depth_is_deterministic(geo):
     a = geo.depth_m(41.9, 8.3)
     b = geo.depth_m(41.9, 8.3)
     assert a == b
+
+
+def test_raster_land_mask_is_loaded(geo):
+    assert geo._land_mask is not None
+
+
+def test_raster_land_mask_agrees_with_polygon_on_known_points(geo):
+    for lat, lon in [(42.3, 9.0), (43.0, 7.9), (41.30, 9.20), (40.9, 9.2)]:
+        assert geo.is_land(lat, lon) == geo.is_land_precise(lat, lon)
+
+
+def test_raster_land_mask_closely_agrees_with_polygon_on_random_sample(geo):
+    # small resolution-driven disagreement right at a coastline boundary is
+    # expected and fine; gross misclassification (interior land vs interior
+    # water) is not. 99% agreement over a random sweep is the bar.
+    rng = random.Random(0)
+    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+    n, agree = 2000, 0
+    for _ in range(n):
+        lat = rng.uniform(lat_min, lat_max)
+        lon = rng.uniform(lon_min, lon_max)
+        if geo.is_land(lat, lon) == geo.is_land_precise(lat, lon):
+            agree += 1
+    assert agree / n >= 0.99
+
+
+@pytest.mark.parametrize(
+    "lat,lon",
+    [
+        (50.0, 8.0),  # north of the bbox
+        (42.0, 20.0),  # east of the bbox
+        (30.0, 8.0),  # south of the bbox
+    ],
+)
+def test_out_of_bounds_queries_raise(geo, lat, lon):
+    with pytest.raises(OutOfOperatingAreaError):
+        geo.is_navigable(lat, lon)
+    with pytest.raises(OutOfOperatingAreaError):
+        geo.depth_m(lat, lon)

@@ -29,7 +29,21 @@ from typing import Protocol
 
 import numpy as np
 
-from core.gridding import bilinear, grid_fracs
+from core.gridding import bilinear, grid_fracs, nearest
+
+# Western-Med corridor bbox real data is cropped to: lon_min, lat_min,
+# lon_max, lat_max. Shared with ingest/fetch_gshhg.py and
+# ingest/fetch_gebco.py (both import this rather than redefining it) and
+# with core/lattice.py (ticket 0.4), which clips the open lattice to stay
+# inside it with margin — RealGeography's bounds check below is then a
+# defensive backstop that should never fire in normal operation.
+OPERATING_AREA_BBOX = (6.7, 40.75, 10.15, 44.0)
+
+
+class OutOfOperatingAreaError(ValueError):
+    """Raised when RealGeography is queried outside OPERATING_AREA_BBOX —
+    real data doesn't exist there, so silently returning "not land"/a
+    clamped depth would be misleading rather than merely imprecise."""
 
 # Land polygons (lat, lon) — western Mediterranean corridor, synthetic/hand-drawn.
 LAND: dict[str, list[tuple[float, float]]] = {
@@ -158,6 +172,15 @@ NOGO: list[dict] = [
 ]
 
 
+def _check_in_bounds(lat_deg: float, lon_deg: float) -> None:
+    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+    if not (lat_min <= lat_deg <= lat_max and lon_min <= lon_deg <= lon_max):
+        raise OutOfOperatingAreaError(
+            f"({lat_deg}, {lon_deg}) is outside OPERATING_AREA_BBOX {OPERATING_AREA_BBOX} — "
+            "no real GSHHG/GEBCO data covers this point"
+        )
+
+
 def _is_nogo(lat: float, lon: float) -> bool:
     return any(
         b["lat_min"] <= lat <= b["lat_max"] and b["lon_min"] <= lon <= b["lon_max"] for b in NOGO
@@ -266,8 +289,25 @@ class RealGeography:
         self._nlat = int(grid["nlat"])
         self._nlon = int(grid["nlon"])
         self._elevation_m = grid["elevation_m"]
+        self._land_mask = grid["land_mask"] if "land_mask" in grid else None
+
+    def _grid_fracs(self, lat_deg: float, lon_deg: float) -> tuple[float, float]:
+        return grid_fracs(
+            lat_deg, lon_deg, self._lat0, self._dlat, self._lon0, self._dlon, self._nlat, self._nlon
+        )
 
     def is_land(self, lat_deg: float, lon_deg: float) -> bool:
+        """Rasterised lookup (fast hot path) — see `is_land_precise` for the
+        GSHHG polygon ray-cast this raster was generated from."""
+        _check_in_bounds(lat_deg, lon_deg)
+        if self._land_mask is None:
+            return self.is_land_precise(lat_deg, lon_deg)
+        fy, fx = self._grid_fracs(lat_deg, lon_deg)
+        return bool(nearest(self._land_mask, fy, fx))
+
+    def is_land_precise(self, lat_deg: float, lon_deg: float) -> bool:
+        """GSHHG polygon ray-cast — precise, not the hot path. What
+        `is_land`'s raster is generated from and tested against."""
         return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in self._land_polygons)
 
     def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
@@ -280,8 +320,7 @@ class RealGeography:
         """GEBCO elevation is negative for depth, positive for land/above
         sea level; a positive-elevation grid cell (land, per the real
         dataset) reads as zero depth rather than a negative number."""
-        fy, fx = grid_fracs(
-            lat_deg, lon_deg, self._lat0, self._dlat, self._lon0, self._dlon, self._nlat, self._nlon
-        )
+        _check_in_bounds(lat_deg, lon_deg)
+        fy, fx = self._grid_fracs(lat_deg, lon_deg)
         elevation_m = bilinear(self._elevation_m, fy, fx)
         return max(0.0, -float(elevation_m))

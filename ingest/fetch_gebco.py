@@ -25,14 +25,12 @@ import fsspec
 import numpy as np
 import xarray as xr
 
+from core.geography import OPERATING_AREA_BBOX
+
 GEBCO_URL = (
     "https://dap.ceda.ac.uk/bodc/gebco/global/gebco_2024/"
     "ice_surface_elevation/netcdf/GEBCO_2024_CF.nc"
 )
-
-# Western-Med corridor bbox: lon_min, lat_min, lon_max, lat_max — matches
-# ingest/fetch_gshhg.py and core/corridors.py's operating area.
-BBOX = (6.7, 40.75, 10.15, 44.0)
 
 
 def fetch_subset(
@@ -54,8 +52,10 @@ def main() -> None:
     parser.add_argument("--out", default="data/geography/bathymetry_western_med.npz")
     args = parser.parse_args()
 
-    print(f"fetching bbox {BBOX} from {GEBCO_URL} (lazy HTTP range reads, ~1-2 min)...")
-    lats, lons, elevation_m = fetch_subset(BBOX)
+    print(
+        f"fetching bbox {OPERATING_AREA_BBOX} from {GEBCO_URL} (lazy HTTP range reads, ~1-2 min)..."
+    )
+    lats, lons, elevation_m = fetch_subset(OPERATING_AREA_BBOX)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)

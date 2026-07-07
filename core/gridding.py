@@ -45,3 +45,12 @@ def bilinear(grid_2d: np.ndarray, fy: float, fx: float) -> float:
     v00, v10 = grid_2d[y0, x0], grid_2d[y1, x0]
     v01, v11 = grid_2d[y0, x1], grid_2d[y1, x1]
     return v00 * (1 - wy) * (1 - wx) + v10 * wy * (1 - wx) + v01 * (1 - wy) * wx + v11 * wy * wx
+
+
+def nearest(grid_2d: np.ndarray, fy: float, fx: float):
+    """Nearest-cell value at fractional (row, col) = (fy, fx) — for grids
+    where the value isn't a quantity to smooth (e.g. a land/water mask;
+    bilinear-blending a boolean makes no sense at the boundary)."""
+    y = min(grid_2d.shape[0] - 1, int(round(fy)))
+    x = min(grid_2d.shape[1] - 1, int(round(fx)))
+    return grid_2d[y, x]

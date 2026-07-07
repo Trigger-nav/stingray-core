@@ -1,8 +1,9 @@
 import pytest
 
-from core.corridors import corridor_east, corridor_west
+from core.corridors import PORTS, corridor_east, corridor_west
 from core.geography import SyntheticGeography
-from core.optimiser import PlanRequest, _dp_route, optimise
+from core.isochrone import time_optimal_route
+from core.optimiser import DEFAULT_SPEEDS_KN, PlanRequest, _dp_route, build_lattice, optimise
 from core.twin import VesselTwin
 from core.units import kn_to_ms
 from core.vessel_spec import VesselSpec
@@ -41,6 +42,27 @@ def test_calm_corridors_converge_and_speed_varies_by_pace(vessel, geo):
     # somewhere in a wide-enough candidate pool (no weather-driven bias).
     all_sides = {c.side for c in economy.candidates} | {c.side for c in schedule.candidates}
     assert all_sides == {"W", "E"}
+
+
+def test_pure_schedule_weights_converge_to_isochrone_time_optimal(vessel, geo):
+    """New C/§5 decision-record cross-check: under pure-schedule weights
+    (Pace=100, Comfort=0 — fuel/comfort/wear barely score at all), the
+    production search's top pick should converge to the isochrone
+    time-optimal oracle's duration (`core.isochrone.time_optimal_route`,
+    which ignores fuel/comfort/wear entirely). Not exact equality — pace=100
+    still carries a small residual fuel weight (see `weights_from_mission`),
+    so a small gap is expected, not a bug."""
+    wx = SyntheticWeatherField("calm")
+    result = optimise(PlanRequest(weather=wx, geography=geo, vessel=vessel, pace=100, comfort=0))
+    top = result.candidates[0]
+
+    twin = VesselTwin(vessel)
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    oracle = time_optimal_route(lattice, wx, geo, twin, DEFAULT_SPEEDS_KN, (1, 2), 0.0)
+    assert oracle is not None
+    _, oracle_duration_h = oracle
+
+    assert top.duration_h == pytest.approx(oracle_duration_h, rel=0.05)
 
 
 def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):

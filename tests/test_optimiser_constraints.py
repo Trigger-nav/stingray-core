@@ -1,8 +1,15 @@
 import pytest
 
-from core.corridors import corridor_west
+from core.corridors import PORTS, corridor_west
 from core.geography import SyntheticGeography
-from core.optimiser import PlanRequest, _dp_route, optimise
+from core.optimiser import (
+    DEFAULT_SPEEDS_KN,
+    PlanRequest,
+    _dp_route,
+    _lattice_route_result,
+    build_lattice,
+    optimise,
+)
 from core.twin import VesselTwin
 from core.units import kn_to_ms
 from core.vessel_spec import VesselSpec
@@ -82,6 +89,20 @@ def test_a4_cross_current_appears_in_cts_not_just_speed(vessel, geo):
     assert any(lt.cts_deg != pytest.approx(lt.course_deg) for lt in result["leg_targets"])
 
 
+def test_a4_cross_current_appears_in_cts_via_lattice_search(vessel, geo):
+    """A4, re-verified against the lattice search (not just `_dp_route`)."""
+    twin = VesselTwin(vessel)
+    weights = combine_weights(weights_from_mission(pace=50, comfort=50), vessel.wear_policy)
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    cross_current = _CurrentField(2.0, 0.0)
+
+    result = _lattice_route_result(
+        lattice, None, cross_current, geo, twin, vessel, weights, DEFAULT_SPEEDS_KN, (1, 2), 0.0
+    )
+    assert result is not None
+    assert any(lt.cts_deg != pytest.approx(lt.course_deg) for lt in result["leg_targets"])
+
+
 def test_a5_no_amount_of_weighting_routes_through_a_nogo_zone(vessel, geo):
     """Land/no-go must be a hard constraint: sweep extreme Pace/Comfort
     settings and confirm no candidate's track ever enters a no-go polygon
@@ -94,6 +115,47 @@ def test_a5_no_amount_of_weighting_routes_through_a_nogo_zone(vessel, geo):
         for candidate in (*result.candidates, result.baseline):
             for point in candidate.track:
                 assert geo.is_navigable(point.lat_deg, point.lon_deg)
+
+
+def test_a5_lattice_search_never_crosses_land_or_nogo(vessel, geo):
+    """A5, re-verified against the lattice search directly (not just via
+    `optimise()`'s merged pool, which could theoretically pass even if the
+    lattice search itself leaked through a no-go zone, as long as the
+    legacy corridor-DP candidates happened to win every diversity slot)."""
+    twin = VesselTwin(vessel)
+    wx = SyntheticWeatherField("calm")
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    for pace, comfort in [(0, 0), (0, 100), (100, 0), (100, 100)]:
+        weights = combine_weights(
+            weights_from_mission(pace=pace, comfort=comfort), vessel.wear_policy
+        )
+        result = _lattice_route_result(
+            lattice, None, wx, geo, twin, vessel, weights, DEFAULT_SPEEDS_KN, (1, 2), 0.0
+        )
+        assert result is not None
+        for point in result["track"]:
+            assert geo.is_navigable(point.lat_deg, point.lon_deg)
+
+
+def test_b5_lattice_search_prunes_overload_speed_entirely(vessel, geo):
+    """B5, re-verified against the lattice search directly: restricting the
+    candidate speed set to *only* the overload speed (17kn — ~107% MCR at
+    2 engines, and worse at 1) must make the whole lattice infeasible
+    (None), proving it's pruned outright rather than merely down-ranked."""
+    twin = VesselTwin(vessel)
+    wx = SyntheticWeatherField("calm")
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    weights = combine_weights(weights_from_mission(pace=100, comfort=0), vessel.wear_policy)
+
+    overload_only = _lattice_route_result(
+        lattice, None, wx, geo, twin, vessel, weights, (17.0,), (1, 2), 0.0
+    )
+    assert overload_only is None
+
+    feasible = _lattice_route_result(
+        lattice, None, wx, geo, twin, vessel, weights, (16.0,), (1, 2), 0.0
+    )
+    assert feasible is not None
 
 
 def test_b5_overload_speed_is_pruned_regardless_of_pace(vessel, geo):
