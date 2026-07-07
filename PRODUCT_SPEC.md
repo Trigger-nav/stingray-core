@@ -80,6 +80,8 @@ Sold B2B to yacht management companies as a fleet tool that produces auditable e
 
 **Plan a passage:** captain enters departure/destination/ETA window → sets mission preset → Stingray returns candidate plans (route, speed profile, engine config) with fuel, ETA, comfort, and wear deltas → captain accepts one; the plan exports to ECDIS as an RTZ route file.
 
+**Destinations are not just ports.** Endpoints can be a port, a named anchorage, or an arbitrary dropped pin — anchorages are the common case for this fleet. Endpoints are validated for navigability and (for anchorages) plausible anchoring depth; per-vessel saved favourites cover v1, with charted/community anchorage datasets as a later enrichment. Roadmap feature (v2, ties to the sea-state model): anchorage recommendation by forecast shelter — "which bay is calm tonight".
+
 **Underway:** edge device streams telemetry → twin updates → weather field corrected against observations → if projected outcome drifts beyond thresholds (fuel +X%, ETA ±Y min, comfort limit), Stingray proposes a revision — quiet by default, never nagging.
 
 **Debrief:** on arrival, an automatic report: savings achieved, forecast accuracy, twin-model confidence, wear events avoided. Aggregates to the fleet dashboard.

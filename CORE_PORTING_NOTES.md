@@ -24,6 +24,8 @@ Review of `prototype/stingray_planner.html` `<script id="core">` before porting.
 
 **B4. Objective weights need documented units.** Demo scaling (fuel ≈ €1/L, time up to ≈ €25/min, comfort ×30, wear ×18) was tuned by eye. Production: express all objectives in a common unit (€ equivalent), document each conversion, and make the slider→weights mapping a tested, versioned function.
 
+**B6. Routing endpoints are arbitrary navigable points, not a port enum (July 2026).** `PORTS` and `OPERATING_AREA_BBOX` become per-region-pack *data* (roadmap R1) — new code must not deepen them as global constants. `PlanRequest` takes origin/destination as `LatLon` (port, named anchorage, or dropped pin); endpoint validation = navigable +, for anchorages, plausible anchoring depth (e.g. 3–50 m band via `Geography.depth_m`). Lattice construction already derives from origin/destination, so this is mostly de-hardcoding, not redesign.
+
 **B5. Slider model changed (spec §4.2, July 2026).** Per-passage inputs are now two: Pace (economy↔schedule) and Comfort (crew transit↔owner aboard). **Wear is no longer a passage slider** — it becomes a per-vessel policy (fixed weight + hard constraints: max continuous load, slamming-avoidance threshold) from `VesselSpec`/settings, applied under every plan and reported as an output metric. The demo still shows three sliders; port the two-slider + policy model, not the demo's.
 
 ## C. Optimiser design notes (ticket 0.4)

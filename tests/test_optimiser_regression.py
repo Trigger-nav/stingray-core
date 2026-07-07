@@ -1,14 +1,17 @@
 import pytest
 
 from core.corridors import PORTS, corridor_east, corridor_west
-from core.geography import SyntheticGeography
+from core.geography import RealGeography, SyntheticGeography
 from core.isochrone import time_optimal_route
 from core.optimiser import DEFAULT_SPEEDS_KN, PlanRequest, _dp_route, build_lattice, optimise
 from core.twin import VesselTwin
-from core.units import kn_to_ms
+from core.units import distance_m, interpolate_point, kn_to_ms, m_to_nm
 from core.vessel_spec import VesselSpec
 from core.weather import SyntheticWeatherField, WeatherSample
 from core.weights import combine_weights, weights_from_mission
+
+FINE_SAMPLE_INTERVAL_NM = 0.25
+REF_LAT_DEG = 42.3
 
 DEFAULT_SPEC_PATH = "data/vessel_specs/mys_50m_default.yaml"
 
@@ -21,6 +24,55 @@ def vessel():
 @pytest.fixture
 def geo():
     return SyntheticGeography()
+
+
+@pytest.fixture(scope="module")
+def real_geo():
+    return RealGeography()
+
+
+def _fine_sample_track_is_navigable(track, geography, interval_nm=FINE_SAMPLE_INTERVAL_NM):
+    """Independent of (and finer than, or equal to) whatever interval
+    `core.legs._navigable_along_leg` itself uses — this is the check that
+    would have caught both ticket 0.4 review findings: a lattice route
+    clipping land in a fixed-fraction sampling gap, and the old
+    straight-centreline baseline crossing real coastline outright."""
+    for i in range(1, len(track)):
+        p, q = track[i - 1], track[i]
+        leg_nm = m_to_nm(distance_m(p, q, REF_LAT_DEG))
+        n = max(1, int(leg_nm / interval_nm))
+        for f in (j / n for j in range(n + 1)):
+            point = interpolate_point(p, q, f)
+            if geography.is_land(point.lat_deg, point.lon_deg):
+                return False, (i, f, point)
+    return True, None
+
+
+def test_every_returned_track_is_navigable_at_fine_resolution(vessel, real_geo):
+    """Regression for both ticket 0.4 review findings: (1) evaluate_leg's
+    navigability sampling missing a narrow headland/islet on a long lattice
+    leg, and (2) the baseline crossing real coastline outright. Sweeps a
+    representative set of scenarios/presets against RealGeography and
+    fine-samples every leg of every returned track (candidates *and*
+    baseline) at a finer resolution than production sampling itself uses,
+    so it can't pass merely by coincidentally matching production's own
+    sample points."""
+    scenarios = ("mistral", "calm", "easterly")
+    presets = [(0, 100), (25, 90), (50, 50), (100, 0)]
+    for scenario in scenarios:
+        wx = SyntheticWeatherField(scenario)
+        for pace, comfort in presets:
+            result = optimise(
+                PlanRequest(
+                    weather=wx, geography=real_geo, vessel=vessel, pace=pace, comfort=comfort
+                )
+            )
+            for candidate in (*result.candidates, result.baseline):
+                ok, bad = _fine_sample_track_is_navigable(candidate.track, real_geo)
+                assert ok, (
+                    f"{scenario} pace={pace} comfort={comfort}: "
+                    f"{candidate.corridor_name} crosses land at {bad}"
+                )
 
 
 def test_mistral_high_comfort_routes_lee_side(vessel, geo):

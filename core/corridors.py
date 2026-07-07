@@ -33,6 +33,29 @@ def _seg(a: LatLon, b: LatLon, n: int) -> list[LatLon]:
 
 
 def corridor_west() -> Corridor:
+    """KNOWN ISSUE (found during ticket 0.4 review, unresolved — ticket 0.8's
+    job): the D->D2 segment below (41.29,9.08 -> 41.26,9.40) cuts straight
+    across the real Bonifacio Strait / Iles Lavezzi archipelago — dozens of
+    scattered granite islets between Corsica and Sardinia, plus the marine
+    reserve and (in reality) a TSS. Against `core.geography.RealGeography`
+    this corridor is infeasible via `core.optimiser._dp_route` at *every*
+    speed/engine-config combination (verified exhaustively, including with
+    the lateral-offset allowance widened to +-5 lanes and the turn-rate to
+    +-3 — a two-waypoint straight segment doesn't thread a scattered reef
+    field no matter how much lateral room the DP is given).
+
+    Ticket 0.4 worked around this by backing `optimiser._baseline_route`
+    with the open lattice search instead of this corridor (see that
+    function's docstring). This corridor's D/D2/D3 waypoints themselves are
+    NOT fixed — doing so properly needs the real TSS lane geometry and
+    chart-derived no-go data (ticket 0.8: "Routing safety constraints: min
+    depth, TSS, no-go polygons from chart data"), not a guess from raw
+    GSHHG coastline polygons. Until then, do not rely on this corridor
+    being feasible under RealGeography; SyntheticGeography (the demo's
+    hand-drawn, coarser polygons) does not exhibit this problem, which is
+    why the optimiser regression/constraint tests that use `_dp_route`
+    directly still pass against it.
+    """
     a = PORTS["antibes"]
     b = LatLon(42.50, 8.25)
     c = LatLon(41.55, 8.60)

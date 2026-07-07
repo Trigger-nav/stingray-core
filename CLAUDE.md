@@ -34,6 +34,6 @@ Demo complete and hosted (synthetic vessel/chart data, live weather via Open-Met
 ## Gotchas
 
 - The demo twin's coefficients are synthetic. Port the *structure*, not the constants; constants become fitted parameters with priors in Phase 1.
-- Bonifacio Strait: TSS + Bouches de Bonifacio reserve; routing must respect no-go polygons and minimum-depth constraints (ticket 0.8).
+- Bonifacio Strait: TSS + Bouches de Bonifacio reserve; routing must respect no-go polygons and minimum-depth constraints (ticket 0.8). **Concrete finding (ticket 0.4 review, still open):** the strait is a scattered field of dozens of small real granite islets (Iles Lavezzi) — `core/corridors.py`'s `corridor_west()` hand-drawn D→D2 waypoint segment cuts straight through them and is infeasible against `RealGeography` at every speed/engine combination, confirmed not fixable by widening its lateral-offset/turn-rate allowance (a two-waypoint straight segment can't thread a scattered reef field). Needs the real TSS lane geometry + chart-derived no-go data in ticket 0.8, not a patch to the existing waypoints. `core/optimiser._baseline_route` currently routes around this by using the open lattice search (ticket 0.4) instead of `corridor_west` — see that function's docstring.
 - Time-dependent costs: weather varies over the passage — the search must be over a time-expanded graph, not a static one.
 - GRIB conventions vary (0–360 vs −180–180 longitudes; wave direction "from" vs "to"). Normalise at the ingest boundary and test it.

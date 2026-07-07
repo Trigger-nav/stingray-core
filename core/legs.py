@@ -8,7 +8,9 @@ rather than being duplicated (and risking drift) across two modules.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
+from functools import lru_cache
 
 from core.corridors import REF_LAT_DEG
 from core.geography import Geography
@@ -25,7 +27,22 @@ from core.units import (
 )
 from core.weather import WeatherField, WeatherSample
 
-LEG_SAMPLE_FRACTIONS: tuple[float, ...] = (0.15, 0.3, 0.45, 0.6, 0.75, 0.9)
+# Fixed-distance navigability sampling, not a fixed *count* of fractional
+# samples: a small fixed number of fractions (e.g. 6) spaces samples many
+# nm apart on a long/diagonal leg, wide enough to step clean over a narrow
+# GSHHG headland or islet between two samples (found via review: a lattice
+# leg clipped land at a point that fell in the gap between the 0.45 and 0.6
+# fractional samples). Distance-based sampling is only practical because
+# `RealGeography.is_land` is a rasterised O(1) lookup (ticket 0.4), not the
+# O(polygons) ray-cast it would have been before that.
+#
+# 0.25nm, not the initially-suggested ~0.5nm: verifying at 0.5nm still let
+# a ~0.49nm-wide islet slip between two samples on a real lattice route
+# (found while fixing this) — production sampling needs to be at least as
+# fine as the regression test's verification resolution (0.25nm, see
+# tests/test_optimiser_regression.py's fine-sampling check), or the two
+# are just racing at different resolutions.
+NAVIGABILITY_SAMPLE_INTERVAL_NM = 0.25
 
 
 @dataclass
@@ -75,6 +92,29 @@ def leg_navigation(
     )
 
 
+@lru_cache(maxsize=200_000)
+def _navigable_along_leg(p: LatLon, q: LatLon, geography: Geography) -> bool:
+    """Sample every ~`NAVIGABILITY_SAMPLE_INTERVAL_NM` along the leg (not p
+    itself — matches the prior convention of relying on the previous leg's
+    endpoint check / the origin being pre-validated; q is always included).
+
+    Memoised: this result depends only on (p, q, geography) — never on
+    speed, engine count, or time — but every search tries several speeds
+    and engine configs per (p, q) edge (up to 8 speeds x 2 engines = 16
+    calls), each re-running the identical distance-sampled geography check.
+    Caching this specifically (not all of `evaluate_leg`, which *does* vary
+    per speed/engine) turned a 4x sampling-density increase (the 0.25nm fix
+    above) into a slowdown large enough to matter (~10x on a full lattice
+    search) — `LatLon` is a frozen/hashable dataclass and `Geography`
+    instances are stable per search, so this is a safe, pure-function cache."""
+    leg_distance_nm = m_to_nm(distance_m(p, q, REF_LAT_DEG))
+    n_samples = max(1, math.ceil(leg_distance_nm / NAVIGABILITY_SAMPLE_INTERVAL_NM))
+    return all(
+        geography.is_navigable(pt.lat_deg, pt.lon_deg)
+        for pt in (interpolate_point(p, q, i / n_samples) for i in range(1, n_samples + 1))
+    )
+
+
 def evaluate_leg(
     p: LatLon,
     q: LatLon,
@@ -92,10 +132,7 @@ def evaluate_leg(
     nav = leg_navigation(p, q, stw_ms, t0_h, weather)
     w = nav.weather_sample
 
-    navigable = all(
-        geography.is_navigable(pt.lat_deg, pt.lon_deg)
-        for pt in (*(interpolate_point(p, q, f) for f in LEG_SAMPLE_FRACTIONS), q)
-    )
+    navigable = _navigable_along_leg(p, q, geography)
 
     fuel_result = twin.fuel_rate(
         v_ms=stw_ms, weather=w, heading_deg=nav.course_deg, active_engines=active_engines

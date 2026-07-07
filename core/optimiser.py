@@ -40,6 +40,20 @@ shortcuts and later porting-notes additions:
 - Isochrone pre-pass (`core.isochrone.reachable_within`) prunes the lattice
   to what's reachable within the ETA window (or a generous default) before
   the A*/DP runs.
+
+**CORE_PORTING_NOTES.md §B6 (de-hardcoding pass):** `PlanRequest.origin`/
+`destination` are now arbitrary `LatLon` (port, named anchorage, or dropped
+pin), not an implicit reference to the Med `PORTS` pair — `core.lattice`
+already took origin/destination as parameters (ticket 0.4), so this was
+mostly removing `optimise()`'s own internal `PORTS["antibes"]`/
+`PORTS["portocervo"]` references, not a redesign. Endpoints are validated
+(navigable always; a plausible anchoring-depth band additionally, when the
+caller flags an endpoint as an anchorage rather than a maintained port) —
+see `_validate_endpoint`. The legacy corridor-DP grid (`corridor_west`/
+`corridor_east`) is Med-specific hand-drawn data (per ROADMAP.md's "Beyond
+Phase 2" notes) and only makes sense for the exact pair its waypoints were
+drawn for — `optimise()` only includes it in the merged candidate pool when
+the request's origin/destination match that pair, not for an arbitrary A→B.
 """
 
 from __future__ import annotations
@@ -63,11 +77,38 @@ BASELINE_SPEED_KN = 14.0
 DEFAULT_TIME_BUCKET_H = 1.0
 DEFAULT_HORIZON_H = 48.0
 
+# Legacy default endpoints (B6: not to be deepened as global constants —
+# this is the one place they're allowed to live on as a default, for
+# backward compatibility with the existing Med corridor tests/callers).
+DEFAULT_ORIGIN = PORTS["antibes"]
+DEFAULT_DESTINATION = PORTS["portocervo"]
+
+# Plausible anchoring depth band (B6) — checked only when a request flags
+# an endpoint as an anchorage rather than a maintained port (a real port's
+# pin can legitimately read as much deeper/shallower than typical anchoring
+# depth at this coarse a geography resolution; a claimed anchorage that
+# reads outside this band is very likely a bad pin, not a real spot).
+ANCHORAGE_MIN_DEPTH_M = 3.0
+ANCHORAGE_MAX_DEPTH_M = 50.0
+
 # Corsica's rough centroid/lat-band, for classifying which side of it a
 # route passes — the generalised replacement for the hardcoded corridor
 # name/side (C: "generalise... to route-signature clustering").
 CORSICA_LAT_BAND = (41.3, 43.0)
 CORSICA_REF_LON = 9.0
+
+
+def _validate_endpoint(point: LatLon, geography: Geography, is_anchorage: bool, label: str) -> None:
+    if not geography.is_navigable(point.lat_deg, point.lon_deg):
+        raise ValueError(f"{label} ({point.lat_deg}, {point.lon_deg}) is not navigable")
+    if is_anchorage:
+        depth_m = geography.depth_m(point.lat_deg, point.lon_deg)
+        if not (ANCHORAGE_MIN_DEPTH_M <= depth_m <= ANCHORAGE_MAX_DEPTH_M):
+            raise ValueError(
+                f"{label} ({point.lat_deg}, {point.lon_deg}) has depth {depth_m:.1f}m, "
+                f"outside the plausible anchoring band "
+                f"[{ANCHORAGE_MIN_DEPTH_M}, {ANCHORAGE_MAX_DEPTH_M}]m"
+            )
 
 
 @dataclass(frozen=True)
@@ -77,9 +118,19 @@ class PlanRequest:
     vessel: VesselSpec
     pace: float
     comfort: float
+    origin: LatLon = DEFAULT_ORIGIN
+    destination: LatLon = DEFAULT_DESTINATION
+    origin_is_anchorage: bool = False
+    destination_is_anchorage: bool = False
     latest_arrival_h: float | None = None
     departure_t0_h: float = 0.0
     speeds_kn: tuple[float, ...] = DEFAULT_SPEEDS_KN
+
+    def __post_init__(self) -> None:
+        _validate_endpoint(self.origin, self.geography, self.origin_is_anchorage, "origin")
+        _validate_endpoint(
+            self.destination, self.geography, self.destination_is_anchorage, "destination"
+        )
 
 
 @dataclass(frozen=True)
@@ -508,47 +559,84 @@ def _dp_route(
 
 
 def _baseline_route(
+    lattice: Lattice,
+    reachable: set[tuple[int, int]] | None,
     weather: WeatherField,
     geography: Geography,
     twin: VesselTwin,
     t0_h: float,
     speed_kn: float = BASELINE_SPEED_KN,
 ) -> Candidate:
-    """Do-nothing: straight down the west-corridor centreline, no micro-
-    routing, twin-engine. Provisional (B3) until ticket 0.7."""
-    corridor = corridor_west()
-    stw_ms = kn_to_ms(speed_kn)
-    pts = corridor.points
-    t, fuel, comfort, wear, max_hs = t0_h, 0.0, 0.0, 0.0, 0.0
-    for i in range(1, len(pts)):
-        leg = evaluate_leg(
-            pts[i - 1], pts[i], stw_ms, t, weather, geography, twin, active_engines=2
-        )
-        t += leg.duration_h
-        fuel += leg.fuel_kg
-        comfort += leg.comfort
-        wear += leg.wear
-        max_hs = max(max_hs, leg.max_hs)
-    distance_nm = sum(
-        m_to_nm(distance_m(pts[i - 1], pts[i], REF_LAT_DEG)) for i in range(1, len(pts))
+    """Do-nothing reference: fixed speed/engine-config (14kn, 2 engines),
+    routed via the open lattice search — not a straight centreline walk,
+    and not `corridor_west`.
+
+    Why not corridor_west (found during ticket 0.4 review): its D->D2
+    waypoint segment cuts directly across the real Bonifacio Strait / Iles
+    Lavezzi archipelago — dozens of scattered granite islets between
+    Corsica and Sardinia (CLAUDE.md's Bonifacio Strait gotcha; see also
+    `core/corridors.py`'s `corridor_west` docstring). Under `RealGeography`
+    it is infeasible at *every* speed/engine combination — verified by
+    widening its lateral-offset allowance to +-5 lanes and turn-rate to
+    +-3, which still finds no path (a two-waypoint straight-line segment
+    just doesn't thread a scattered reef field). Properly routing this
+    strait needs the real TSS lane geometry and chart-derived no-go data —
+    that's ticket 0.8's job, not something to improvise here from raw
+    coastline polygons. The lattice search already reliably finds a
+    feasible route through this exact area (that's the point of ticket
+    0.4), so it backs the baseline too, at a fixed reference speed/config
+    rather than letting mission weights pick the "best" one — still a
+    do-nothing reference, not a recommendation. Provisional (B3) until
+    ticket 0.7 regardless of any of the above.
+
+    `reachable` is an isochrone pre-pass over a *generous* horizon — an
+    unpruned lattice search is dramatically slower, so this must not be
+    skipped, but it also must not reuse the candidate search's own
+    `reachable` unmodified: that one is pruned to the *requested* ETA
+    window, which can be arbitrarily tight (or, in one regression test,
+    deliberately impossible) — reusing it here would prune away the
+    destination itself and make this do-nothing reference come back
+    infeasible even though a real route exists. `optimise()` passes a
+    dedicated `baseline_reachable`, computed with `DEFAULT_HORIZON_H`
+    whenever the request's own window is tighter than that.
+    """
+    neutral_weights = combine_weights(
+        weights_from_mission(pace=50, comfort=50), twin.spec.wear_policy
     )
-    leg_targets = _build_leg_targets(tuple(pts), [stw_ms] * (len(pts) - 1), t0_h, weather)
+    result = _lattice_route_result(
+        lattice,
+        reachable,
+        weather,
+        geography,
+        twin,
+        twin.spec,
+        neutral_weights,
+        (speed_kn,),
+        (2,),
+        t0_h,
+    )
+    if result is None:
+        raise RuntimeError(
+            "baseline route (fixed 14kn, 2 engines) is infeasible even via the open "
+            "lattice search — this should not happen given its demonstrated coverage; "
+            "investigate before trusting any PlanResult from this geography/weather."
+        )
     return Candidate(
-        corridor_name=corridor.name,
-        side=corridor.side,
+        corridor_name="Lattice route (baseline reference — see _baseline_route docstring)",
+        side=_route_signature(result["track"]),
         speed_kn=speed_kn,
         active_engines=2,
-        track=tuple(pts),
-        duration_h=t - t0_h,
-        distance_nm=distance_nm,
-        fuel_kg=fuel,
-        comfort_index=comfort,
-        wear_index=wear,
-        max_hs_m=max_hs,
+        track=result["track"],
+        duration_h=result["duration_h"],
+        distance_nm=result["distance_nm"],
+        fuel_kg=result["fuel_kg"],
+        comfort_index=result["comfort_index"],
+        wear_index=result["wear_index"],
+        max_hs_m=result["max_hs_m"],
         score_eur=float("nan"),
         meets_eta_window=None,
-        leg_targets=leg_targets,
-        alteration_list=_build_alteration_list(leg_targets),
+        leg_targets=result["leg_targets"],
+        alteration_list=result["alteration_list"],
     )
 
 
@@ -590,7 +678,7 @@ def optimise(request: PlanRequest) -> PlanResult:
     candidates_all: list[Candidate] = []
 
     # --- Ticket 0.4: open lattice search (primary path) ---
-    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    lattice = build_lattice(request.origin, request.destination)
     horizon_h = (
         request.latest_arrival_h if request.latest_arrival_h is not None else DEFAULT_HORIZON_H
     )
@@ -603,6 +691,28 @@ def optimise(request: PlanRequest) -> PlanResult:
         engine_configs,
         request.departure_t0_h,
         horizon_h,
+    )
+    # The baseline must reflect the *actual* achievable passage regardless
+    # of the requested ETA window — it's a do-nothing reference, not
+    # subject to schedule pressure. Reusing `reachable` above would be
+    # wrong when the window is tight (or, as a regression test deliberately
+    # does, impossibly tight): the pre-pass would prune away the
+    # destination itself, and the baseline would come back infeasible even
+    # though a real route exists. Only recompute when the request's own
+    # horizon was actually tighter than the generous default.
+    baseline_reachable = (
+        reachable
+        if horizon_h >= DEFAULT_HORIZON_H
+        else reachable_within(
+            lattice,
+            request.weather,
+            request.geography,
+            twin,
+            request.speeds_kn,
+            engine_configs,
+            request.departure_t0_h,
+            DEFAULT_HORIZON_H,
+        )
     )
 
     primary = _lattice_route_result(
@@ -659,36 +769,42 @@ def optimise(request: PlanRequest) -> PlanResult:
                 )
             )
 
-    # --- Ticket 0.2: corridor DP grid — always computed too, both as the
-    # roadmap's literal fallback/fast path (if the lattice search above
-    # found nothing) and as a cheap source of extra diversity otherwise. ---
+    # --- Ticket 0.2: corridor DP grid — Med-specific hand-drawn waypoints
+    # (B6/ROADMAP.md "Beyond Phase 2"), only meaningful for the exact
+    # origin/destination pair they were drawn for. Computed too when it
+    # applies, both as the roadmap's literal fallback/fast path (if the
+    # lattice search above found nothing) and as a cheap source of extra
+    # diversity otherwise — for any other origin/destination, skipped
+    # entirely; the lattice search + baseline are origin/destination-general
+    # on their own. ---
     grid: list[dict] = []
-    for corridor_fn in (corridor_west, corridor_east):
-        corridor = corridor_fn()
-        for speed_kn in request.speeds_kn:
-            stw_ms = kn_to_ms(speed_kn)
-            for active_engines in engine_configs:
-                result = _dp_route(
-                    corridor,
-                    stw_ms,
-                    speed_kn,
-                    active_engines,
-                    request.weather,
-                    request.geography,
-                    twin,
-                    weights,
-                    request.departure_t0_h,
-                )
-                if result is None:
-                    continue
-                grid.append(
-                    {
-                        "corridor": corridor,
-                        "speed_kn": speed_kn,
-                        "active_engines": active_engines,
-                        "result": result,
-                    }
-                )
+    if request.origin == DEFAULT_ORIGIN and request.destination == DEFAULT_DESTINATION:
+        for corridor_fn in (corridor_west, corridor_east):
+            corridor = corridor_fn()
+            for speed_kn in request.speeds_kn:
+                stw_ms = kn_to_ms(speed_kn)
+                for active_engines in engine_configs:
+                    result = _dp_route(
+                        corridor,
+                        stw_ms,
+                        speed_kn,
+                        active_engines,
+                        request.weather,
+                        request.geography,
+                        twin,
+                        weights,
+                        request.departure_t0_h,
+                    )
+                    if result is None:
+                        continue
+                    grid.append(
+                        {
+                            "corridor": corridor,
+                            "speed_kn": speed_kn,
+                            "active_engines": active_engines,
+                            "result": result,
+                        }
+                    )
 
     best_by_key: dict[tuple[str, float], dict] = {}
     for item in grid:
@@ -730,7 +846,14 @@ def optimise(request: PlanRequest) -> PlanResult:
             if all(p.side != c.side or abs(p.speed_kn - c.speed_kn) >= 2 for p in picks):
                 picks.append(c)
 
-    baseline = _baseline_route(request.weather, request.geography, twin, request.departure_t0_h)
+    baseline = _baseline_route(
+        lattice,
+        baseline_reachable,
+        request.weather,
+        request.geography,
+        twin,
+        request.departure_t0_h,
+    )
 
     return PlanResult(
         candidates=tuple(picks), baseline=baseline, weights=weights, missed_window=missed_window
