@@ -34,6 +34,10 @@ ingest = [
     # (Debian/Ubuntu, incl. GitHub Actions runners) -- not installable via
     # pip alone. See CLAUDE.md's GRIB-conventions gotcha.
     "cfgrib>=0.9",
+    # xarray's .interp() (WW3-wave -> GFS-wind grid resampling in
+    # fetch_grib_nomads.py) requires scipy at runtime -- found on first
+    # real run, missing from the original ticket 0.5 declaration.
+    "scipy>=1.11",
 ]
 
 [tool.hatch.build.targets.wheel]

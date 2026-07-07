@@ -27,9 +27,10 @@ from core.weather import GriddedWeatherField, WeatherSample
 # A handful of representative points within OPERATING_AREA_BBOX, away from
 # the coastline (so both sources should have real, non-missing data).
 CHECK_POINTS = [
-    (42.0, 8.0),
-    (41.6, 9.2),
-    (43.2, 9.3),
+    (42.0, 8.0),   # west of Corsica, open water
+    (41.55, 9.65),  # north Tyrrhenian, east of Bonifacio — replaces (41.6, 9.2),
+    # which is inside Corsica and was (correctly) land-masked on every run
+    (43.2, 9.3),   # Ligurian, off Cap Corse
 ]
 DEFAULT_HOURS = (0.0, 6.0, 12.0, 24.0)
 
