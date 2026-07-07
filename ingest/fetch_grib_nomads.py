@@ -14,16 +14,17 @@ Normalises to `core/weather.py`'s `GriddedWeatherField` schema via
 wind is intentionally left unmasked, see `GriddedWeatherField`'s docstring),
 longitude is wrapped to [-180, 180), and wave direction is passed through
 `direction_to_from_convention_deg` (currently identity —
-`WW3_DIRECTION_IS_TO_CONVENTION` is unverified-but-assumed-False, see
-`ingest/grib_common.py`'s module docstring).
+`WW3_DIRECTION_IS_TO_CONVENTION` is empirically confirmed `False`, see
+`ingest/grib_common.py`'s module docstring and CLAUDE.md's "first real run"
+results, 2026-07-07: 16° mean cross-source wave-direction agreement).
 
-**Not exercised end-to-end in CI or by the author** (no `eccodes`/`cfgrib`
-available in the scoping sandbox — see CLAUDE.md's GRIB-conventions gotcha).
-`tests/test_grib_parsing.py` opens committed real-sample fixtures with
-`pytest.importorskip("cfgrib")`, so it verifies the parsing shape wherever
-eccodes *is* installed, but a real end-to-end run + the cross-source check
-(`ingest/verify_grib_consistency.py`) is still needed before trusting this
-in production — see CLAUDE.md's "first real run" checklist.
+**Verified end-to-end 2026-07-07** (CLAUDE.md's GRIB-conventions gotcha):
+both fetchers run live, `tests/test_grib_parsing.py`'s cfgrib fixture tests
+pass, `ingest/verify_grib_consistency.py` confirmed cross-source agreement.
+Real cfgrib shortNames for WW3's fields (confirmed against the committed
+fixtures, not guessed) are `swh`/`perpw`/`dirpw` — `_get_var` below is now
+a direct, exact lookup, not the permissive candidate-search this used to
+be while those names were unconfirmed.
 
 Requires cfgrib + xarray (ingest-only deps, see pyproject.toml's `ingest`
 extra) — core/ stays numpy+PyYAML only. cfgrib additionally requires the
@@ -60,30 +61,23 @@ from ingest.grib_common import (
 NOMADS_BASE = "https://nomads.ncep.noaa.gov/cgi-bin"
 STEP_H = 1  # confirmed hourly GFS wind + WW3 wave availability through 48h+ (scoping)
 
-WIND_VAR_CANDIDATES = {"u10_ms": ["u10", "10u"], "v10_ms": ["v10", "10v"]}
-WAVE_VAR_CANDIDATES = {
-    "hs_m": ["swh", "htsgw"],
-    "period_s": ["mwp", "perpw"],
-    "dir_deg": ["mwd", "dirpw"],
-}
+# Confirmed cfgrib shortNames (2026-07-07 first real run, cross-checked
+# directly against the committed fixtures in tests/fixtures/grib/ -- see
+# CLAUDE.md's GRIB-conventions gotcha). GFS wind decodes exactly as WMO's
+# standard shortNames; WW3's wave fields keep NOAA's own local-table names
+# rather than the WMO discipline-10 names ECMWF's `mwd`/`mwp` use (PERPW's
+# GRIB_name is literally "Primary wave mean period" -- it's a mean, not a
+# peak period; NOMADS' wave output has no distinct peak-period field, so
+# it's reused as an approximation for both, same as before -- see
+# `build_grid`).
+WIND_VARS = {"u10_ms": "u10", "v10_ms": "v10"}
+WAVE_VARS = {"hs_m": "swh", "period_s": "perpw", "dir_deg": "dirpw"}
 
 
-def _find_var(ds: xr.Dataset, candidates: list[str]) -> xr.DataArray:
-    """Locate a variable by GRIB shortName, checked defensively against
-    both the xarray variable key and the raw GRIB attrs cfgrib exposes —
-    NOAA-vs-WMO shortName naming for these exact wave fields wasn't
-    confirmed without eccodes during scoping (see module docstring), so
-    this fails loudly (listing what *was* found) rather than silently
-    grabbing the wrong variable."""
-    candidates_lower = {c.lower() for c in candidates}
-    for name, da in ds.data_vars.items():
-        keys = {str(name).lower()}
-        for attr in ("GRIB_shortName", "GRIB_cfVarName", "GRIB_name"):
-            if attr in da.attrs:
-                keys.add(str(da.attrs[attr]).lower())
-        if keys & candidates_lower:
-            return da
-    raise KeyError(f"none of {candidates} found in dataset variables {list(ds.data_vars)}")
+def _get_var(ds: xr.Dataset, name: str) -> xr.DataArray:
+    if name not in ds.data_vars:
+        raise KeyError(f"{name!r} not found in dataset variables {list(ds.data_vars)}")
+    return ds[name]
 
 
 def _grib_filter_url(script: str, *, dir_path: str, file_name: str, extra: dict) -> str:
@@ -162,11 +156,11 @@ def build_grid(
             )
             wave_ds = wave_ds.interp(latitude=wind_ds.latitude, longitude=wind_ds.longitude)
 
-            u10 = _find_var(wind_ds, WIND_VAR_CANDIDATES["u10_ms"])
-            v10 = _find_var(wind_ds, WIND_VAR_CANDIDATES["v10_ms"])
-            hs = _find_var(wave_ds, WAVE_VAR_CANDIDATES["hs_m"])
-            period = _find_var(wave_ds, WAVE_VAR_CANDIDATES["period_s"])
-            wave_dir = _find_var(wave_ds, WAVE_VAR_CANDIDATES["dir_deg"])
+            u10 = _get_var(wind_ds, WIND_VARS["u10_ms"])
+            v10 = _get_var(wind_ds, WIND_VARS["v10_ms"])
+            hs = _get_var(wave_ds, WAVE_VARS["hs_m"])
+            period = _get_var(wave_ds, WAVE_VARS["period_s"])
+            wave_dir = _get_var(wave_ds, WAVE_VARS["dir_deg"])
 
             if lats is None:
                 lats = wind_ds.latitude.values.astype(float)
@@ -199,8 +193,9 @@ def build_grid(
         "dlon": float(lons[1] - lons[0]),
         "hours": hours,
         "hs_m": hs_m,
+        # PERPW is actually mean period -- no distinct peak field, see WAVE_VARS above.
         "period_peak_s": period_s,
-        "period_mean_s": period_s,  # NOMADS PERPW is the only period field fetched (see docstring)
+        "period_mean_s": period_s,
         "wave_from_deg": dir_deg,
         "wind_u_ms": np.stack(wind_u_frames),
         "wind_v_ms": np.stack(wind_v_frames),

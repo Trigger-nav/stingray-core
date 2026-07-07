@@ -8,14 +8,13 @@ I/O, so it's fully unit-testable without cfgrib/eccodes.
 live during scoping: ECMWF open data's wave stream `mwd` ("mean wave
 direction") is WMO-standard from-convention — same as wind, usable as-is.
 NOAA's own GRIB2 parameter tables for WW3's `DIRPW`/`WVDIR`/`SWDIR` give
-units ("degree true") but no explicit from/to statement, and every WW3
-product description found describes it the same way as wind — but this is
-**not empirically verified against a real decoded file** (no eccodes in
-the scoping sandbox). `WW3_DIRECTION_IS_TO_CONVENTION` is the single place
-that assumption lives — flip it once someone confirms for real (the
-cross-source consistency check in `ingest/verify_grib_consistency.py` is
-built to do exactly that empirically, by comparing WW3 and ECMWF wave
-direction for the same real sea state).
+units ("degree true") but no explicit from/to statement. **Empirically
+confirmed from-convention as of the 2026-07-07 first real run**: NOMADS
+and ECMWF wave direction for the same real sea state agreed to within 16°
+mean (`ingest/verify_grib_consistency.py`), far closer to 0° than the
+~180° a convention mismatch would produce. `WW3_DIRECTION_IS_TO_CONVENTION`
+stays `False` — the single place this lives, flip it if a future run ever
+disagrees.
 """
 
 from __future__ import annotations

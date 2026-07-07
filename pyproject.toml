@@ -53,3 +53,12 @@ select = ["E", "F", "I", "UP"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# Default `pytest` run excludes `slow` (RealGeography-heavy searches --
+# one test alone, test_every_returned_track_is_navigable_at_fine_resolution,
+# is ~370s of a ~414s full run). Full suite (CI, or before committing an
+# optimiser change): `pytest -m ""` overrides this back to running
+# everything -- see .github/workflows/ci.yml.
+addopts = "-m 'not slow'"
+markers = [
+    "slow: RealGeography-heavy searches (multi-minute); excluded by default, see addopts",
+]

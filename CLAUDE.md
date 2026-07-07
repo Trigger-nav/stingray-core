@@ -23,12 +23,19 @@ Demo complete and hosted (synthetic vessel/chart data, live weather via Open-Met
 4. **No invented numbers:** every prediction carries a confidence interval; the twin is physics-informed and interpretable (separate calm-water, added-resistance, SFOC, motion components), not a monolithic black box.
 5. **Privacy:** yacht position data is owner-sensitive; per-vessel isolation, anonymised aggregates only.
 
+## Ways of working
+
+- **Plan before implementing, and save the plan to `docs/plans/ticket-N.md`** — plans get reviewed (by Jack + Cowork-side review) before code. This flow caught real issues on 0.4/0.5; keep it.
+- Ticket rows in `ROADMAP.md` carry agreed scope/acceptance criteria — read the row before planning. 0.6's row defines its full approach, including the synthetic parameter-recovery acceptance test.
+- After completing a ticket, update its ROADMAP row status and any affected gotchas here — these files are the shared source of truth between sessions and tools.
+
 ## Phase 0 engineering conventions
 
 - Python 3.11+, `pyproject.toml`, `pytest`, `ruff`; type hints throughout. Port hot paths to Rust later only if profiling demands it.
 - Package layout: `core/` (twin, optimiser, weather) as a library with no I/O side effects; `ingest/` for data acquisition; thin CLIs on top.
 - Real geography: GSHHG coastlines (land mask), GEBCO 2024 bathymetry. Real weather: NOAA NOMADS GRIB2 + ECMWF open data, parsed with cfgrib (needs `brew install eccodes`).
 - Every optimiser change must keep the regression suite green: known scenario → expected plan-shape assertions (e.g. mistral + comfort-heavy weights ⇒ lee-side routing; ETA window infeasible ⇒ flagged, fastest-first ordering).
+- `pytest` (bare) runs the fast suite (~29s) — `RealGeography`-heavy searches are marked `@pytest.mark.slow` and excluded by default (`addopts` in `pyproject.toml`; one test, the fine-resolution navigability sweep, is ~370s alone). Run `pytest -m ""` for the full suite (what CI runs) before trusting an optimiser/geography change.
 - Ticket 0.7 (savings-verification methodology) is a written deliverable, not code — do not skip it; the commercial claim depends on it.
 
 ## Gotchas

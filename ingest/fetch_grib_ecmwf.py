@@ -19,16 +19,14 @@ Normalises to `core/weather.py`'s `GriddedWeatherField` schema via
 `ingest/grib_common.py`: land cells in the *wave* fields become NaN (B2 —
 wind is intentionally left unmasked, see `GriddedWeatherField`'s docstring).
 Direction is a no-op here: ECMWF's `mwd` is WMO-standard from-convention,
-confirmed live in scoping (see `ingest/grib_common.py`'s module docstring)
-— unlike NOMADS' WW3 `DIRPW`, which is assumed-but-unverified.
+confirmed live in scoping — and, as of the 2026-07-07 first real run,
+NOMADS' WW3 `DIRPW` is now *also* empirically confirmed from-convention
+via cross-source agreement (`ingest/verify_grib_consistency.py`, 16° mean
+disagreement) — see `ingest/grib_common.py`'s module docstring.
 
-**Not exercised end-to-end in CI or by the author** (no `eccodes`/`cfgrib`
-available in the scoping sandbox — see CLAUDE.md's GRIB-conventions gotcha).
-`tests/test_grib_parsing.py` opens committed real-sample fixtures with
-`pytest.importorskip("cfgrib")`, so it verifies the parsing shape wherever
-eccodes *is* installed, but a real end-to-end run + the cross-source check
-(`ingest/verify_grib_consistency.py`) is still needed before trusting this
-in production — see CLAUDE.md's "first real run" checklist.
+**Verified end-to-end 2026-07-07** (CLAUDE.md's GRIB-conventions gotcha):
+run live against the real ECMWF service, `tests/test_grib_parsing.py`'s
+cfgrib fixture tests pass, cross-source consistency check passed.
 
 Requires cfgrib + xarray (ingest-only deps, see pyproject.toml's `ingest`
 extra) — core/ stays numpy+PyYAML only. cfgrib additionally requires the

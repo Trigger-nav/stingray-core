@@ -16,5 +16,5 @@ jobs:
         run: pip install -e ".[dev]"
       - name: Lint
         run: ruff check .
-      - name: Test
-        run: pytest
+      - name: Test (full suite, incl. slow)
+        run: pytest -m ""

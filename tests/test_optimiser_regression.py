@@ -55,6 +55,7 @@ def _fine_sample_track_is_navigable(track, geography, interval_nm=FINE_SAMPLE_IN
     return True, None
 
 
+@pytest.mark.slow
 def test_every_returned_track_is_navigable_at_fine_resolution(vessel, real_geo):
     """Regression for both ticket 0.4 review findings: (1) evaluate_leg's
     navigability sampling missing a narrow headland/islet on a long lattice
@@ -136,6 +137,7 @@ def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):
     assert durations == sorted(durations)
 
 
+@pytest.mark.slow
 def test_charter_window_infeasible_reflects_vessel_envelope_not_an_arbitrary_number(
     vessel, real_geo
 ):
@@ -166,6 +168,7 @@ def test_charter_window_infeasible_reflects_vessel_envelope_not_an_arbitrary_num
     assert all(c.speed_kn <= ceiling_kn for c in result.candidates)
 
 
+@pytest.mark.slow
 def test_bonifacio_unreachable_at_current_lattice_resolution_is_diagnosed(vessel, real_geo):
     """ROADMAP.md ticket 0.8 finding: the open lattice can't thread the real
     Bonifacio Strait / Iles Lavezzi channel at its current 5nm lane spacing,

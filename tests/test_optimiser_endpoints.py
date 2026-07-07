@@ -90,6 +90,7 @@ def test_custom_origin_destination_skips_the_legacy_corridor_grid(vessel, geo, c
         assert candidate.corridor_name not in legacy_names
 
 
+@pytest.mark.slow
 def test_default_endpoints_still_include_the_legacy_corridor_grid(vessel, geo, calm):
     # sanity check the guard's *other* branch: the Med default pair should
     # still be able to surface legacy-corridor candidates (whether or not
