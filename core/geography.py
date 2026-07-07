@@ -1,44 +1,136 @@
-"""Geography interface (E1) and a synthetic backing implementation.
+"""Geography interface (E1) and two backing implementations.
 
-Ported from the demo's LAND/NOGO polygons and chart-layer bathymetry
-heuristic (`prototype/stingray_planner.html`). Ticket 0.3 replaces
-`SyntheticGeography` with a GSHHG/GEBCO-backed implementation behind the
-same `Geography` protocol — the optimiser and twin never depend on which
-one is in use.
+`SyntheticGeography` is ported from the demo's LAND/NOGO polygons and
+chart-layer bathymetry heuristic (`prototype/stingray_planner.html`) —
+still used by the optimiser regression/constraint tests, which are testing
+optimiser logic against a known, deterministic geography, not coastline
+fidelity.
+
+`RealGeography` (ticket 0.3) is sourced from real public datasets — GSHHG
+coastline (land/no-go) and GEBCO_2024 bathymetry (depth) — over the same
+western-Med corridor bbox, produced by `ingest/fetch_gshhg.py` and
+`ingest/fetch_gebco.py` into the two small files it loads. Both classes
+satisfy the same `Geography` protocol, so `optimiser.py`/`twin.py` never
+depend on which one is in use.
+
+Explicit scope boundary (see the ticket 0.3 plan): this only sources real
+land + depth *data*. `depth_m` is not yet wired into the optimiser as a
+hard constraint (that's ticket 0.8, same as A5's land/no-go pruning note
+says for minimum depth), and the marine-reserve `NOGO` boxes stay synthetic
+placeholders pending 0.8's real chart-derived no-go polygons.
 """
 
 from __future__ import annotations
 
+import json
 import math
+from pathlib import Path
 from typing import Protocol
+
+import numpy as np
+
+from core.gridding import bilinear, grid_fracs
 
 # Land polygons (lat, lon) — western Mediterranean corridor, synthetic/hand-drawn.
 LAND: dict[str, list[tuple[float, float]]] = {
     "mainland": [
-        (43.42, 6.70), (43.50, 6.95), (43.55, 7.01), (43.54, 7.13), (43.63, 7.19),
-        (43.69, 7.29), (43.72, 7.35), (43.75, 7.42), (43.78, 7.53), (43.79, 7.61),
-        (43.82, 7.78), (43.88, 8.03), (43.92, 8.15), (44.05, 8.23), (44.18, 8.40),
-        (44.31, 8.48), (44.39, 8.77), (44.40, 8.93), (44.35, 9.10), (44.30, 9.21),
-        (44.25, 9.38), (44.16, 9.65), (44.05, 9.83), (44.03, 9.99), (43.96, 10.13),
-        (43.88, 10.15), (44.5, 10.15), (44.5, 6.70),
+        (43.42, 6.70),
+        (43.50, 6.95),
+        (43.55, 7.01),
+        (43.54, 7.13),
+        (43.63, 7.19),
+        (43.69, 7.29),
+        (43.72, 7.35),
+        (43.75, 7.42),
+        (43.78, 7.53),
+        (43.79, 7.61),
+        (43.82, 7.78),
+        (43.88, 8.03),
+        (43.92, 8.15),
+        (44.05, 8.23),
+        (44.18, 8.40),
+        (44.31, 8.48),
+        (44.39, 8.77),
+        (44.40, 8.93),
+        (44.35, 9.10),
+        (44.30, 9.21),
+        (44.25, 9.38),
+        (44.16, 9.65),
+        (44.05, 9.83),
+        (44.03, 9.99),
+        (43.96, 10.13),
+        (43.88, 10.15),
+        (44.5, 10.15),
+        (44.5, 6.70),
     ],
     "corsica": [
-        (43.01, 9.36), (42.92, 9.34), (42.80, 9.33), (42.74, 9.29), (42.68, 9.30),
-        (42.73, 9.21), (42.68, 9.05), (42.64, 8.94), (42.59, 8.83), (42.57, 8.75),
-        (42.51, 8.66), (42.43, 8.60), (42.38, 8.55), (42.29, 8.57), (42.22, 8.55),
-        (42.13, 8.60), (42.05, 8.68), (41.98, 8.63), (41.92, 8.74), (41.88, 8.70),
-        (41.86, 8.61), (41.78, 8.68), (41.73, 8.78), (41.68, 8.90), (41.62, 8.85),
-        (41.55, 8.79), (41.48, 8.90), (41.43, 9.02), (41.39, 9.10), (41.39, 9.16),
-        (41.42, 9.22), (41.50, 9.27), (41.59, 9.33), (41.70, 9.40), (41.85, 9.41),
-        (42.00, 9.49), (42.10, 9.51), (42.30, 9.54), (42.50, 9.53), (42.70, 9.45),
-        (42.85, 9.47), (42.95, 9.46),
+        (43.01, 9.36),
+        (42.92, 9.34),
+        (42.80, 9.33),
+        (42.74, 9.29),
+        (42.68, 9.30),
+        (42.73, 9.21),
+        (42.68, 9.05),
+        (42.64, 8.94),
+        (42.59, 8.83),
+        (42.57, 8.75),
+        (42.51, 8.66),
+        (42.43, 8.60),
+        (42.38, 8.55),
+        (42.29, 8.57),
+        (42.22, 8.55),
+        (42.13, 8.60),
+        (42.05, 8.68),
+        (41.98, 8.63),
+        (41.92, 8.74),
+        (41.88, 8.70),
+        (41.86, 8.61),
+        (41.78, 8.68),
+        (41.73, 8.78),
+        (41.68, 8.90),
+        (41.62, 8.85),
+        (41.55, 8.79),
+        (41.48, 8.90),
+        (41.43, 9.02),
+        (41.39, 9.10),
+        (41.39, 9.16),
+        (41.42, 9.22),
+        (41.50, 9.27),
+        (41.59, 9.33),
+        (41.70, 9.40),
+        (41.85, 9.41),
+        (42.00, 9.49),
+        (42.10, 9.51),
+        (42.30, 9.54),
+        (42.50, 9.53),
+        (42.70, 9.45),
+        (42.85, 9.47),
+        (42.95, 9.46),
     ],
     "sardinia": [
-        (41.24, 9.14), (41.18, 9.22), (41.16, 9.31), (41.13, 9.41), (41.15, 9.53),
-        (41.11, 9.53), (41.05, 9.55), (41.00, 9.62), (40.95, 9.55), (40.92, 9.50),
-        (40.88, 9.56), (40.80, 9.65), (40.75, 9.68), (40.75, 8.13), (40.84, 8.13),
-        (40.93, 8.19), (40.96, 8.32), (40.92, 8.48), (40.92, 8.71), (40.99, 8.84),
-        (41.02, 8.93), (41.10, 9.00), (41.17, 9.06),
+        (41.24, 9.14),
+        (41.18, 9.22),
+        (41.16, 9.31),
+        (41.13, 9.41),
+        (41.15, 9.53),
+        (41.11, 9.53),
+        (41.05, 9.55),
+        (41.00, 9.62),
+        (40.95, 9.55),
+        (40.92, 9.50),
+        (40.88, 9.56),
+        (40.80, 9.65),
+        (40.75, 9.68),
+        (40.75, 8.13),
+        (40.84, 8.13),
+        (40.93, 8.19),
+        (40.96, 8.32),
+        (40.92, 8.48),
+        (40.92, 8.71),
+        (40.99, 8.84),
+        (41.02, 8.93),
+        (41.10, 9.00),
+        (41.17, 9.06),
     ],
     "asinara": [(41.03, 8.25), (41.08, 8.30), (41.12, 8.33), (41.09, 8.25), (41.05, 8.22)],
     "maddalena": [(41.20, 9.37), (41.23, 9.39), (41.24, 9.42), (41.215, 9.435), (41.19, 9.41)],
@@ -64,6 +156,12 @@ NOGO: list[dict] = [
         "lon_max": 9.31,
     },
 ]
+
+
+def _is_nogo(lat: float, lon: float) -> bool:
+    return any(
+        b["lat_min"] <= lat <= b["lat_max"] and b["lon_min"] <= lon <= b["lon_max"] for b in NOGO
+    )
 
 
 def _point_in_polygon(lat: float, lon: float, poly: list[tuple[float, float]]) -> bool:
@@ -107,10 +205,7 @@ class SyntheticGeography:
         return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in LAND.values())
 
     def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
-        return any(
-            b["lat_min"] <= lat_deg <= b["lat_max"] and b["lon_min"] <= lon_deg <= b["lon_max"]
-            for b in NOGO
-        )
+        return _is_nogo(lat_deg, lon_deg)
 
     def is_navigable(self, lat_deg: float, lon_deg: float) -> bool:
         return not (self.is_land(lat_deg, lon_deg) or self.is_nogo(lat_deg, lon_deg))
@@ -136,3 +231,57 @@ class SyntheticGeography:
         elif lat_deg <= 42.4 and lon_deg > 9.6:
             cap = 1250.0  # north Tyrrhenian
         return min(cap, max(12.0, shelf))
+
+
+DEFAULT_COASTLINE_PATH = "data/geography/coastline_western_med.json"
+DEFAULT_BATHYMETRY_PATH = "data/geography/bathymetry_western_med.npz"
+
+
+class RealGeography:
+    """GSHHG coastline + GEBCO_2024 bathymetry over the western-Med corridor
+    bbox (ticket 0.3). Loads two committed, pre-cropped data files produced
+    by `ingest/fetch_gshhg.py`/`ingest/fetch_gebco.py` — no network, no
+    shapefile/netCDF parsing at runtime, just `json` + `numpy`.
+
+    `NOGO` reserve boxes are still the synthetic placeholder (see module
+    docstring) — real chart-derived no-go polygons are ticket 0.8.
+    """
+
+    def __init__(
+        self,
+        coastline_path: str | Path = DEFAULT_COASTLINE_PATH,
+        bathymetry_path: str | Path = DEFAULT_BATHYMETRY_PATH,
+    ) -> None:
+        with open(coastline_path) as f:
+            coastline = json.load(f)
+        self._land_polygons: list[list[tuple[float, float]]] = [
+            [(lat, lon) for lat, lon in poly] for poly in coastline["polygons"]
+        ]
+
+        grid = np.load(bathymetry_path)
+        self._lat0 = float(grid["lat0"])
+        self._dlat = float(grid["dlat"])
+        self._lon0 = float(grid["lon0"])
+        self._dlon = float(grid["dlon"])
+        self._nlat = int(grid["nlat"])
+        self._nlon = int(grid["nlon"])
+        self._elevation_m = grid["elevation_m"]
+
+    def is_land(self, lat_deg: float, lon_deg: float) -> bool:
+        return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in self._land_polygons)
+
+    def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
+        return _is_nogo(lat_deg, lon_deg)
+
+    def is_navigable(self, lat_deg: float, lon_deg: float) -> bool:
+        return not (self.is_land(lat_deg, lon_deg) or self.is_nogo(lat_deg, lon_deg))
+
+    def depth_m(self, lat_deg: float, lon_deg: float) -> float:
+        """GEBCO elevation is negative for depth, positive for land/above
+        sea level; a positive-elevation grid cell (land, per the real
+        dataset) reads as zero depth rather than a negative number."""
+        fy, fx = grid_fracs(
+            lat_deg, lon_deg, self._lat0, self._dlat, self._lon0, self._dlon, self._nlat, self._nlon
+        )
+        elevation_m = bilinear(self._elevation_m, fy, fx)
+        return max(0.0, -float(elevation_m))

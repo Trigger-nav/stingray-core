@@ -23,6 +23,7 @@ from typing import Protocol
 
 import numpy as np
 
+from core.gridding import bilinear, grid_fracs
 from core.units import components_from_direction, direction_from_components, kn_to_ms
 
 
@@ -119,17 +120,9 @@ class SyntheticWeatherField:
 
 # ---------------------------------------------------------------------------
 # Gridded interpolation engine (backing implementation for ticket 0.5).
+# Bilinear/grid-fraction math lives in core/gridding.py, shared with
+# core/geography.py's RealGeography bathymetry lookup (ticket 0.3).
 # ---------------------------------------------------------------------------
-
-
-def _bilinear(grid_2d: np.ndarray, fy: float, fx: float) -> float:
-    y0, x0 = int(math.floor(fy)), int(math.floor(fx))
-    wy, wx = fy - y0, fx - x0
-    y1 = min(y0 + 1, grid_2d.shape[0] - 1)
-    x1 = min(x0 + 1, grid_2d.shape[1] - 1)
-    v00, v10 = grid_2d[y0, x0], grid_2d[y1, x0]
-    v01, v11 = grid_2d[y0, x1], grid_2d[y1, x1]
-    return v00 * (1 - wy) * (1 - wx) + v10 * wy * (1 - wx) + v01 * (1 - wy) * wx + v11 * wy * wx
 
 
 class GriddedWeatherField:
@@ -174,11 +167,9 @@ class GriddedWeatherField:
         _, self._nlat, self._nlon = self._hs.shape
 
     def _grid_fracs(self, lat_deg: float, lon_deg: float) -> tuple[float, float]:
-        fy = (lat_deg - self._lat0) / self._dlat
-        fx = (lon_deg - self._lon0) / self._dlon
-        fy = max(0.0, min(self._nlat - 1.001, fy))
-        fx = max(0.0, min(self._nlon - 1.001, fx))
-        return fy, fx
+        return grid_fracs(
+            lat_deg, lon_deg, self._lat0, self._dlat, self._lon0, self._dlon, self._nlat, self._nlon
+        )
 
     def sample(self, lat_deg: float, lon_deg: float, t_h: float) -> WeatherSample:
         fy, fx = self._grid_fracs(lat_deg, lon_deg)
@@ -190,8 +181,8 @@ class GriddedWeatherField:
         t1 = min(t0 + 1, len(self._hours) - 1)
 
         def at(arr3d: np.ndarray) -> float:
-            v0 = _bilinear(arr3d[t0], fy, fx)
-            v1 = _bilinear(arr3d[t1], fy, fx)
+            v0 = bilinear(arr3d[t0], fy, fx)
+            v1 = bilinear(arr3d[t1], fy, fx)
             return float(v0 * (1 - wt) + v1 * wt)
 
         hs = at(self._hs)

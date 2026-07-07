@@ -14,3 +14,7 @@ prototype/
 # binary duplicates of tracked markdown docs
 *.docx
 docs_assets_system_overview.png
+
+# ingest download/extract cache (large raw source data; only the small
+# cropped outputs under data/ get committed)
+.cache/
