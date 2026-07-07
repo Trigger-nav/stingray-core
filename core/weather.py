@@ -19,11 +19,12 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
 
-from core.gridding import bilinear, grid_fracs
+from core.gridding import bilinear, bilinear_masked, grid_fracs
 from core.units import components_from_direction, direction_from_components, kn_to_ms
 
 
@@ -127,9 +128,18 @@ class SyntheticWeatherField:
 
 class GriddedWeatherField:
     """Bilinear-in-space, linear-in-time interpolation over a regular
-    lat/lon/time grid. Directions interpolate via vector components. Any
-    NaN in the source arrays (land, per B2) propagates to a missing sample
-    rather than being read as calm.
+    lat/lon/time grid. Directions interpolate via vector components.
+
+    Land-masking (B2) is wave-only, per ticket 0.5: `hs_m`/periods/wave
+    direction use `bilinear_masked` (renormalises over whichever corners
+    aren't NaN, only fully-missing when *all four* are — see
+    `core/gridding.py`), so a point near shore (an anchorage approach,
+    say) still gets a real wave estimate from its valid neighbours instead
+    of reading as missing just because one stencil corner is land. Wind is
+    never land-masked at ingest in the first place: an over-land GFS/IFS
+    wind value is a real model output, not a hardcoded-calm artefact the
+    way the demo's wave field was, so there's no equivalent bug to guard
+    against and plain `bilinear` is used for it.
 
     All arrays are shaped (n_hours, n_lat, n_lon).
     """
@@ -150,6 +160,9 @@ class GriddedWeatherField:
         wind_v_ms: np.ndarray,
         current_u_ms: np.ndarray,
         current_v_ms: np.ndarray,
+        cycle: str | None = None,
+        fetched: str | None = None,
+        source: str | None = None,
     ) -> None:
         self._lat0, self._dlat = lat0_deg, dlat_deg
         self._lon0, self._dlon = lon0_deg, dlon_deg
@@ -165,6 +178,41 @@ class GriddedWeatherField:
         self._wave_dir_u = np.sin(rad)
         self._wave_dir_v = np.cos(rad)
         _, self._nlat, self._nlon = self._hs.shape
+        # Provenance (ticket 0.5): which model cycle, when this field was
+        # fetched, and from where -- None for in-memory/test-built fields
+        # that were never loaded from an ingest npz.
+        self.cycle = cycle
+        self.fetched = fetched
+        self.source = source
+
+    @classmethod
+    def from_npz(cls, path: str | Path) -> GriddedWeatherField:
+        """Load a grid written by `ingest/fetch_grib_nomads.py` or
+        `ingest/fetch_grib_ecmwf.py` -- mirrors
+        `core.geography.RealGeography.__init__`'s `np.load(...)` +
+        field-unpacking pattern. No default path constant here (unlike
+        geography's static, committed data): which source/cycle to load is
+        a caller decision, not a library default, since forecasts are
+        time-varying and per-run rather than committed repo content."""
+        grid = np.load(path, allow_pickle=False)
+        return cls(
+            lat0_deg=float(grid["lat0"]),
+            dlat_deg=float(grid["dlat"]),
+            lon0_deg=float(grid["lon0"]),
+            dlon_deg=float(grid["dlon"]),
+            hours=list(grid["hours"]),
+            hs_m=grid["hs_m"],
+            period_peak_s=grid["period_peak_s"],
+            period_mean_s=grid["period_mean_s"],
+            wave_from_deg=grid["wave_from_deg"],
+            wind_u_ms=grid["wind_u_ms"],
+            wind_v_ms=grid["wind_v_ms"],
+            current_u_ms=grid["current_u_ms"],
+            current_v_ms=grid["current_v_ms"],
+            cycle=str(grid["cycle"]) if "cycle" in grid else None,
+            fetched=str(grid["fetched"]) if "fetched" in grid else None,
+            source=str(grid["source"]) if "source" in grid else None,
+        )
 
     def _grid_fracs(self, lat_deg: float, lon_deg: float) -> tuple[float, float]:
         return grid_fracs(
@@ -180,19 +228,20 @@ class GriddedWeatherField:
         wt = ti - t0
         t1 = min(t0 + 1, len(self._hours) - 1)
 
-        def at(arr3d: np.ndarray) -> float:
-            v0 = bilinear(arr3d[t0], fy, fx)
-            v1 = bilinear(arr3d[t1], fy, fx)
+        def at(arr3d: np.ndarray, *, masked: bool = False) -> float:
+            fn = bilinear_masked if masked else bilinear
+            v0 = fn(arr3d[t0], fy, fx)
+            v1 = fn(arr3d[t1], fy, fx)
             return float(v0 * (1 - wt) + v1 * wt)
 
-        hs = at(self._hs)
-        peak = at(self._period_peak)
-        mean = at(self._period_mean)
+        hs = at(self._hs, masked=True)
+        peak = at(self._period_peak, masked=True)
+        mean = at(self._period_mean, masked=True)
         wind_u = at(self._wind_u)
         wind_v = at(self._wind_v)
         current_u = at(self._current_u)
         current_v = at(self._current_v)
-        wdu, wdv = at(self._wave_dir_u), at(self._wave_dir_v)
+        wdu, wdv = at(self._wave_dir_u, masked=True), at(self._wave_dir_v, masked=True)
         wave_from_deg = (
             float("nan")
             if (math.isnan(wdu) or math.isnan(wdv))

@@ -3,7 +3,7 @@ import math
 import numpy as np
 import pytest
 
-from core.gridding import bilinear, grid_fracs
+from core.gridding import bilinear, bilinear_masked, grid_fracs
 
 
 def test_grid_fracs_interior_point():
@@ -46,3 +46,28 @@ def test_bilinear_nan_corner_propagates():
     # exactly on the one valid corner still touches the NaN corner's zero-weight
     # term (0 * nan = nan in IEEE754) -- conservative by design, see core/weather.py.
     assert math.isnan(bilinear(grid, 0.0, 0.0))
+
+
+def test_bilinear_masked_matches_plain_bilinear_with_no_nan():
+    grid = np.array([[1.0, 2.0], [3.0, 4.0]])
+    assert bilinear_masked(grid, 0.5, 0.5) == pytest.approx(bilinear(grid, 0.5, 0.5))
+    assert bilinear_masked(grid, 0.25, 0.75) == pytest.approx(bilinear(grid, 0.25, 0.75))
+
+
+def test_bilinear_masked_renormalises_over_valid_corners():
+    # one NaN corner (bottom-right); interior query point touches all four.
+    grid = np.array([[1.0, 2.0], [3.0, np.nan]])
+    result = bilinear_masked(grid, 0.5, 0.5)
+    assert not math.isnan(result)
+    # equal weights (0.25 each) on the three valid corners once renormalised.
+    assert result == pytest.approx((1.0 + 2.0 + 3.0) / 3)
+
+
+def test_bilinear_masked_all_nan_returns_nan():
+    grid = np.array([[np.nan, np.nan], [np.nan, np.nan]])
+    assert math.isnan(bilinear_masked(grid, 0.5, 0.5))
+
+
+def test_bilinear_masked_exact_valid_corner_next_to_nan_returns_that_value():
+    grid = np.array([[1.0, np.nan], [3.0, 4.0]])
+    assert bilinear_masked(grid, 0.0, 0.0) == pytest.approx(1.0)

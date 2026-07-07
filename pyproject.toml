@@ -18,8 +18,9 @@ dev = [
     "ruff>=0.6",
 ]
 # Ingest-only: one-time data preprocessing (GSHHG shapefile parsing/clipping,
-# GEBCO remote netCDF subsetting). core/ stays at numpy+PyYAML only — these
-# never get imported at runtime, only by scripts under ingest/.
+# GEBCO remote netCDF subsetting, GRIB2 weather parsing). core/ stays at
+# numpy+PyYAML only — these never get imported at runtime, only by scripts
+# under ingest/.
 ingest = [
     "pyshp>=2.3",
     "shapely>=2.0",
@@ -28,6 +29,11 @@ ingest = [
     "h5py>=3.10",
     "fsspec>=2024.2",
     "aiohttp>=3.9",
+    # cfgrib additionally requires the system eccodes C library --
+    # `brew install eccodes` (macOS) / `apt-get install libeccodes-dev`
+    # (Debian/Ubuntu, incl. GitHub Actions runners) -- not installable via
+    # pip alone. See CLAUDE.md's GRIB-conventions gotcha.
+    "cfgrib>=0.9",
 ]
 
 [tool.hatch.build.targets.wheel]

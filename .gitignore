@@ -18,3 +18,9 @@ docs_assets_system_overview.png
 # ingest download/extract cache (large raw source data; only the small
 # cropped outputs under data/ get committed)
 .cache/
+
+# fetched weather forecasts (ticket 0.5): unlike data/geography's static,
+# committed data, these go stale within hours -- regenerable, per-run
+# artefacts, not repo content. Run ingest/fetch_grib_nomads.py /
+# fetch_grib_ecmwf.py to produce them locally.
+data/weather/*.npz

@@ -47,6 +47,39 @@ def bilinear(grid_2d: np.ndarray, fy: float, fx: float) -> float:
     return v00 * (1 - wy) * (1 - wx) + v10 * wy * (1 - wx) + v01 * (1 - wy) * wx + v11 * wy * wx
 
 
+def bilinear_masked(grid_2d: np.ndarray, fy: float, fx: float) -> float:
+    """Bilinear value at fractional (row, col) = (fy, fx), renormalising
+    the weights over whichever corners aren't NaN rather than propagating
+    any single NaN corner to a fully-missing result the way plain
+    `bilinear` does.
+
+    Plain `bilinear`'s any-corner-NaN-propagates behaviour is too
+    conservative for a land-masked weather grid (core/weather.py, B2): a
+    query point just offshore — an anchorage approach, say — sits in a
+    stencil with at least one land (NaN) corner far more often than not,
+    and treating that as "no data" would make near-shore sampling report
+    missing almost everywhere anchorage routing actually needs a value.
+    Only returns NaN when *every* corner is NaN (genuinely no nearby data,
+    e.g. a query deep inside a landmass)."""
+    y0, x0 = int(math.floor(fy)), int(math.floor(fx))
+    wy, wx = fy - y0, fx - x0
+    y1 = min(y0 + 1, grid_2d.shape[0] - 1)
+    x1 = min(x0 + 1, grid_2d.shape[1] - 1)
+    corners = (
+        (grid_2d[y0, x0], (1 - wy) * (1 - wx)),
+        (grid_2d[y1, x0], wy * (1 - wx)),
+        (grid_2d[y0, x1], (1 - wy) * wx),
+        (grid_2d[y1, x1], wy * wx),
+    )
+    valid = [(float(v), w) for v, w in corners if not math.isnan(v)]
+    if not valid:
+        return float("nan")
+    total_w = sum(w for _, w in valid)
+    if total_w <= 1e-12:
+        return valid[0][0]
+    return sum(v * w for v, w in valid) / total_w
+
+
 def nearest(grid_2d: np.ndarray, fy: float, fx: float):
     """Nearest-cell value at fractional (row, col) = (fy, fx) — for grids
     where the value isn't a quantity to smooth (e.g. a land/water mask;
