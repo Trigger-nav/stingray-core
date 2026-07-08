@@ -1,0 +1,34 @@
+{
+  "source": "marineregions.org gazetteer search API (https://www.marineregions.org/rest/getGazetteerRecordsByName.json/, tokenless, confirmed live during ticket 0.8 scoping)",
+  "note": "Polygon vertices are rectangular bounding boxes from real, cited sources, not hand-drawn guesses -- an improvement in provenance over the fully-invented boxes these replace. They are NOT precise legal reserve boundaries (real reserves are irregular polygons, and in the Bonifacio case cover more area than the archipelago's own extent) -- see each zone's 'precise_boundary_verified' and 'caveat'. Follow-up: EEA's own Natura2000 WFS or French INPN open data for the actual designated-area polygons (ticket 0.8 plan, 'Real-data sourcing').",
+  "zones": [
+    {
+      "name": "Reserve de Scandola",
+      "mrgid": 26848,
+      "gazetteer_source": "World Heritage Marine Programme",
+      "gazetteer_name": "Gulf of Porto: Calanche of Piana, Gulf of Girolata, Scandola Reserve",
+      "precise_boundary_verified": false,
+      "caveat": "Real, cited bounding box (UNESCO World Heritage Marine Programme via marineregions.org) -- still a rectangular approximation of an irregular real reserve boundary, not the legal designation polygon itself.",
+      "polygon": [
+        [42.2197, 8.5276],
+        [42.2197, 8.7086],
+        [42.4246, 8.7086],
+        [42.4246, 8.5276]
+      ]
+    },
+    {
+      "name": "Iles Lavezzi archipelago",
+      "mrgid": 3457,
+      "gazetteer_source": "ASFA thesaurus",
+      "gazetteer_name": "Lavezzi",
+      "precise_boundary_verified": false,
+      "caveat": "Real, cited bounding box for the archipelago itself (marineregions.org) -- the actual Reserve naturelle des Bouches de Bonifacio marine reserve extends well beyond this to cover much of the strait's southern Corsican waters; this box is deliberately the tighter, precisely-sourced archipelago extent rather than a guessed wider reserve boundary. The physical islets themselves are already represented precisely by the real GSHHG coastline data (core.geography.RealGeography) independent of this no-go zone.",
+      "polygon": [
+        [41.3328, 9.2476],
+        [41.3328, 9.2636],
+        [41.3514, 9.2636],
+        [41.3514, 9.2476]
+      ]
+    }
+  ]
+}

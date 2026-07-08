@@ -11,6 +11,7 @@ hull:
   length_wl_m: 45.0
   beam_wl_m: 9.0
   block_coefficient: 0.52
+  draft_m: 2.5   # typical laden draft for a 45m displacement motoryacht
 
 # Calm-water power vs Froude number (A1): power = (linear*v^2 + cubic*v^3)
 # * (1 + steepening_coefficient * (Fn/hull_speed_froude)^steepening_exponent).
@@ -49,6 +50,13 @@ engines:
 hotel_load_fuel_kg_per_h: 36.0   # gensets + hotel load, flat (matches demo's simplification)
 fuel_density_kg_per_l: 0.85      # marine diesel, API-boundary conversion only (B1)
 co2_per_kg_fuel: 3.15            # kg CO2 per kg diesel fuel (combustion factor)
+
+# Minimum-depth hard constraint (ticket 0.8): core.legs prunes any leg
+# passing shallower than hull.draft_m + min_under_keel_clearance_m,
+# except within the pilotage-exemption radius of a declared origin/
+# destination. 2m is a simple flat placeholder margin, not vessel-class-
+# derived UKC policy (that's a naval-arch question).
+min_under_keel_clearance_m: 2.0
 
 # Motion/comfort heuristic (ported shape, period-extended):
 # comfort_rate = scale * hs^hs_exponent * beam_response * period_factor * speed_factor

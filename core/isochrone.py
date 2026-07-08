@@ -31,23 +31,6 @@ from core.weather import WeatherField
 
 Node = tuple[int, int]  # (stage, lane)
 
-# Max lane change per along-track stage. Ported from the demo's corridor
-# turn-rate limit (which used +-1 against its own already-bent, hand-drawn
-# centreline); the open lattice offsets from the *straight* rhumb line, so
-# routing around Corsica needs a materially larger lateral excursion in the
-# same number of stages -- +-1 measurably under-serves it (verified: it
-# made the legacy corridor-DP grid consistently beat the lattice search on
-# its own best side, which isn't a hard-constraint issue, just too little
-# room to bend).
-LANE_TURN_RATE = 2
-
-
-def _neighbour_lanes(lattice: Lattice, stage: int, lane: int) -> range:
-    next_max_lane = lattice.max_lane_per_stage[stage]
-    return range(
-        max(-next_max_lane, lane - LANE_TURN_RATE), min(next_max_lane, lane + LANE_TURN_RATE) + 1
-    )
-
 
 def _best_feasible_duration_h(
     p: LatLon,
@@ -58,6 +41,7 @@ def _best_feasible_duration_h(
     twin: VesselTwin,
     speeds_kn: tuple[float, ...],
     engine_configs: tuple[int, ...],
+    depth_exempt_points: tuple[LatLon, ...],
 ) -> float | None:
     """Fastest feasible leg duration trying every (speed, engine-config)
     combination — engine count doesn't change duration directly, but *does*
@@ -68,8 +52,18 @@ def _best_feasible_duration_h(
     for speed_kn in speeds_kn:
         stw_ms = kn_to_ms(speed_kn)
         for active_engines in engine_configs:
-            leg = evaluate_leg(p, q, stw_ms, t_h, weather, geography, twin, active_engines)
-            if not leg.navigable or leg.slam_event or leg.overload:
+            leg = evaluate_leg(
+                p,
+                q,
+                stw_ms,
+                t_h,
+                weather,
+                geography,
+                twin,
+                active_engines,
+                depth_exempt_points=depth_exempt_points,
+            )
+            if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
                 continue
             if best is None or leg.duration_h < best:
                 best = leg.duration_h
@@ -94,6 +88,7 @@ def reachable_within(
     this wrongly prune everything). This is a conservative
     over-approximation of what the full multi-objective search could still
     reach — it never prunes a node reachable via *some* available choice."""
+    depth_exempt_points = (lattice.origin, lattice.destination)
     start: Node = (0, 0)
     best_arrival: dict[Node, float] = {start: t0_h}
     heap: list[tuple[float, Node]] = [(t0_h, start)]
@@ -108,10 +103,10 @@ def reachable_within(
         stage, lane = node
         if stage + 1 >= lattice.n_stages:
             continue
-        for next_lane in _neighbour_lanes(lattice, stage + 1, lane):
+        for next_lane in lattice.turn_range(stage, lane):
             p, q = lattice.point(stage, lane), lattice.point(stage + 1, next_lane)
             best_leg_duration = _best_feasible_duration_h(
-                p, q, t, weather, geography, twin, speeds_kn, engine_configs
+                p, q, t, weather, geography, twin, speeds_kn, engine_configs, depth_exempt_points
             )
             if best_leg_duration is None:
                 continue
@@ -140,6 +135,7 @@ def time_optimal_route(
     each edge's minimum-duration choice is a purely local decision).
     Test oracle only: ignores fuel/comfort/wear scoring entirely. Returns
     (track, duration_h), or None if the destination is unreachable."""
+    depth_exempt_points = (lattice.origin, lattice.destination)
     start: Node = (0, 0)
     destination_stage = lattice.n_stages - 1
     best_arrival: dict[Node, float] = {start: t0_h}
@@ -153,10 +149,10 @@ def time_optimal_route(
         stage, lane = node
         if stage == destination_stage:
             continue
-        for next_lane in _neighbour_lanes(lattice, stage + 1, lane):
+        for next_lane in lattice.turn_range(stage, lane):
             p, q = lattice.point(stage, lane), lattice.point(stage + 1, next_lane)
             best_leg_duration = _best_feasible_duration_h(
-                p, q, t, weather, geography, twin, speeds_kn, engine_configs
+                p, q, t, weather, geography, twin, speeds_kn, engine_configs, depth_exempt_points
             )
             if best_leg_duration is None:
                 continue

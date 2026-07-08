@@ -33,28 +33,28 @@ def _seg(a: LatLon, b: LatLon, n: int) -> list[LatLon]:
 
 
 def corridor_west() -> Corridor:
-    """KNOWN ISSUE (found during ticket 0.4 review, unresolved — ticket 0.8's
-    job): the D->D2 segment below (41.29,9.08 -> 41.26,9.40) cuts straight
-    across the real Bonifacio Strait / Iles Lavezzi archipelago — dozens of
-    scattered granite islets between Corsica and Sardinia, plus the marine
-    reserve and (in reality) a TSS. Against `core.geography.RealGeography`
-    this corridor is infeasible via `core.optimiser._dp_route` at *every*
-    speed/engine-config combination (verified exhaustively, including with
-    the lateral-offset allowance widened to +-5 lanes and the turn-rate to
-    +-3 — a two-waypoint straight segment doesn't thread a scattered reef
-    field no matter how much lateral room the DP is given).
-
-    Ticket 0.4 worked around this by backing `optimiser._baseline_route`
-    with the open lattice search instead of this corridor (see that
-    function's docstring). This corridor's D/D2/D3 waypoints themselves are
-    NOT fixed — doing so properly needs the real TSS lane geometry and
-    chart-derived no-go data (ticket 0.8: "Routing safety constraints: min
-    depth, TSS, no-go polygons from chart data"), not a guess from raw
-    GSHHG coastline polygons. Until then, do not rely on this corridor
-    being feasible under RealGeography; SyntheticGeography (the demo's
-    hand-drawn, coarser polygons) does not exhibit this problem, which is
-    why the optimiser regression/constraint tests that use `_dp_route`
-    directly still pass against it.
+    """**Resolved, ticket 0.8 (2026-07-08) — feasible under RealGeography
+    again.** Prior finding (ticket 0.4 review): the D->D2 segment below
+    (41.29,9.08 -> 41.26,9.40) passes close to the real Bonifacio Strait /
+    Iles Lavezzi archipelago's scattered granite islets, and under
+    `core.geography.RealGeography` this corridor was infeasible via
+    `core.optimiser._dp_route` at *every* speed/engine-config combination
+    tried, including with the lateral-offset allowance widened to +-5 lanes
+    and the turn-rate to +-3. That exhaustive check was against the
+    synthetic *placeholder* no-go box `RealGeography` used before ticket
+    0.8 (`lat 41.29-41.36, lon 9.21-9.31` — see the old `NOGO` list in
+    `core/geography.py`'s history), which happened to cover the exact
+    lateral-offset water the DP needed around the islets. Ticket 0.8's
+    real, cited no-go geometry (`data/geography/nogo_western_med.json`,
+    marineregions.org MRGID 3457 — the tighter, precisely-sourced Lavezzi
+    *archipelago* box, `lat 41.3328-41.3514, lon 9.2476-9.2636`) no longer
+    blocks that water, and this corridor is feasible again (verified: 1
+    engine/10kn reaches ~193nm, clean track). It's a true fast-path
+    fallback for this passage once more, not a permanently-broken one —
+    the open lattice search (`core/lattice.py`, ticket 0.4) remains the
+    primary/more-thorough search and still backs `optimiser._baseline_route`
+    (see that function's docstring), but this corridor is no longer
+    something callers must avoid relying on under RealGeography.
     """
     a = PORTS["antibes"]
     b = LatLon(42.50, 8.25)

@@ -25,11 +25,35 @@ def test_open_water_ligurian_basin_is_navigable_and_deep(geo):
     assert geo.depth_m(43.0, 7.9) > 1000.0
 
 
-def test_scandola_reserve_is_still_synthetic_nogo(geo):
-    # ticket 0.3 explicitly keeps NOGO synthetic (real chart no-go data is 0.8)
-    assert geo.is_nogo(42.35, 8.55) is True
-    assert geo.is_land(42.35, 8.55) is False
-    assert geo.is_navigable(42.35, 8.55) is False
+def test_scandola_reserve_is_a_real_cited_nogo_zone(geo):
+    # ticket 0.8: RealGeography loads real, cited zones (marineregions.org
+    # MRGID 26848, World Heritage Marine Programme) from
+    # data/geography/nogo_western_med.json instead of the synthetic boxes
+    # -- a point well inside the real bounding box.
+    assert geo.is_nogo(42.28, 8.58) is True
+    assert geo.is_land(42.28, 8.58) is False
+    assert geo.is_navigable(42.28, 8.58) is False
+
+
+def test_iles_lavezzi_archipelago_is_a_real_cited_nogo_zone(geo):
+    # marineregions.org MRGID 3457 (ASFA thesaurus) -- a point inside the
+    # archipelago's real bounding box, distinct from the physical islets
+    # themselves (already represented by the real GSHHG coastline).
+    assert geo.is_nogo(41.34, 9.255) is True
+
+
+def test_bonifacio_tss_separation_zone_is_a_hard_nogo(geo):
+    # ticket 0.8: the placeholder TSS separation zone
+    # (data/geography/tss_western_med.json) is a hard no-go, same
+    # mechanism as a chart-derived reserve -- explicitly NOT a directional
+    # lane rule (see the file's scope_note and CLAUDE.md's Bonifacio
+    # gotcha follow-up). A point inside its bounding box.
+    assert geo.is_nogo(41.38, 9.06) is True
+
+
+def test_open_water_outside_any_nogo_zone_is_navigable(geo):
+    assert geo.is_nogo(41.29, 9.08) is False
+    assert geo.is_navigable(41.29, 9.08) is True
 
 
 def test_bonifacio_strait_is_navigable_and_shallow_relative_to_basin(geo):

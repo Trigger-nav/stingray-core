@@ -18,6 +18,7 @@ class HullParticulars:
     length_wl_m: float
     beam_wl_m: float
     block_coefficient: float
+    draft_m: float
 
 
 @dataclass(frozen=True)
@@ -104,6 +105,13 @@ class VesselSpec:
     co2_per_kg_fuel: float
     comfort: ComfortCoefficients
     wear_policy: WearPolicy
+    # Flat safety margin (ticket 0.8) -- not vessel-class-derived UKC
+    # policy, that's a naval-arch question, same provisional status as
+    # ticket 0.6's fitted coefficients. core.legs enforces
+    # hull.draft_m + min_under_keel_clearance_m as a hard constraint
+    # (A5 pattern), except within the pilotage-exemption radius of a
+    # declared origin/destination.
+    min_under_keel_clearance_m: float
     provisional: bool = field(default=True)
 
     @classmethod
@@ -126,4 +134,5 @@ class VesselSpec:
             co2_per_kg_fuel=data["co2_per_kg_fuel"],
             comfort=ComfortCoefficients(**data["comfort"]),
             wear_policy=WearPolicy(**data["wear_policy"]),
+            min_under_keel_clearance_m=data["min_under_keel_clearance_m"],
         )

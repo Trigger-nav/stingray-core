@@ -6,13 +6,15 @@ from core.isochrone import time_optimal_route
 from core.optimiser import (
     TEST_SPEEDS_KN,
     PlanRequest,
+    _distinguishing_region,
     _dp_route,
+    _side_diversity_filter,
     build_lattice,
     feasible_speeds_kn,
     optimise,
 )
 from core.twin import VesselTwin
-from core.units import distance_m, interpolate_point, kn_to_ms, m_to_nm
+from core.units import LatLon, distance_m, interpolate_point, kn_to_ms, m_to_nm
 from core.vessel_spec import VesselSpec
 from core.weather import SyntheticWeatherField, WeatherSample
 from core.weights import combine_weights, weights_from_mission
@@ -138,17 +140,16 @@ def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):
 
 
 @pytest.mark.slow
-def test_charter_window_infeasible_reflects_vessel_envelope_not_an_arbitrary_number(
-    vessel, real_geo
-):
+def test_charter_window_reflects_vessel_envelope_not_an_arbitrary_number(vessel, real_geo):
     """Charter-window regression, grounded in real physics rather than an
-    arbitrary too-small number (the 0.5h case above): against
-    `RealGeography`, a window tighter than the vessel's own envelope-capped
-    fastest passage (`feasible_speeds_kn`'s ceiling, ~16kn on this spec —
-    see `test_optimiser_constraints.py`) must still come back flagged and
-    fastest-first, and every returned candidate must respect that ceiling —
-    the search isn't quietly reaching for a speed the vessel can't
-    sustain to try to satisfy an impossible window."""
+    arbitrary too-small number (the 0.5h case above). ROADMAP.md ticket 0.8
+    restored a genuinely feasible W-side (via-Bonifacio) route against
+    `RealGeography` (~12.0h, vs. the E-only ~13.9h this used to be limited
+    to — see CLAUDE.md's now-resolved Bonifacio gotcha): a window of 13.0h
+    is tighter than E's fastest but comfortably inside W's, so it must come
+    back genuinely feasible via a W candidate, not merely "still infeasible
+    for a different reason". Also confirms no candidate quietly exceeds the
+    vessel's own envelope-capped speed ceiling to make the window."""
     wx = SyntheticWeatherField("calm")
     ceiling_kn = max(feasible_speeds_kn(vessel))
     result = optimise(
@@ -158,33 +159,33 @@ def test_charter_window_infeasible_reflects_vessel_envelope_not_an_arbitrary_num
             vessel=vessel,
             pace=100,
             comfort=0,
-            latest_arrival_h=13.5,  # tighter than the fastest achievable at this ceiling
+            latest_arrival_h=13.0,  # tighter than E's fastest (~13.9h), inside W's (~12.0h)
         )
     )
-    assert result.missed_window is True
-    assert any(d.code == "eta_window_infeasible" for d in result.diagnostics)
-    durations = [c.duration_h for c in result.candidates]
-    assert durations == sorted(durations)
+    assert result.missed_window is False
+    assert any(c.side == "W" for c in result.candidates)
     assert all(c.speed_kn <= ceiling_kn for c in result.candidates)
 
 
 @pytest.mark.slow
-def test_bonifacio_unreachable_at_current_lattice_resolution_is_diagnosed(vessel, real_geo):
-    """ROADMAP.md ticket 0.8 finding: the open lattice can't thread the real
-    Bonifacio Strait / Iles Lavezzi channel at its current 5nm lane spacing,
-    so every plan on this passage currently goes east-about only — this
-    used to be silent (see CLAUDE.md's Bonifacio gotcha). A generous,
-    perfectly achievable window (so this isn't conflated with the
-    ETA-window-infeasible case above) should still surface a machine-
-    readable diagnostic explaining the missing W-side option, not just
-    quietly return only E-side candidates."""
+def test_bonifacio_strait_transit_is_reachable_at_current_lattice_resolution(vessel, real_geo):
+    """ROADMAP.md ticket 0.8: the open lattice can now thread the real
+    Bonifacio Strait / Iles Lavezzi channel — adaptive per-stage lattice
+    refinement (`core.lattice.build_lattice`) handles the genuine
+    scattered-islet resolution need, and a side-diversity-filter bug (which
+    had been constraining lane sign across the *whole* passage rather than
+    just the Corsica-spanning "distinguishing region", silently forcing the
+    W-side search onto real Sardinian coastline at the final approach) is
+    fixed. This route used to be diagnosed as W-side-unreachable (see
+    CLAUDE.md's now-resolved Bonifacio gotcha) — both sides should be
+    genuinely reachable now, with no diagnostic."""
     wx = SyntheticWeatherField("calm")
     result = optimise(
         PlanRequest(weather=wx, geography=real_geo, vessel=vessel, pace=50, comfort=50)
     )
     assert result.missed_window is False
-    assert {c.side for c in result.candidates} == {"E"}
-    assert any(d.code == "route_side_unreachable" and d.side == "W" for d in result.diagnostics)
+    assert {c.side for c in result.candidates} == {"W", "E"}
+    assert not any(d.code == "route_side_unreachable" for d in result.diagnostics)
 
 
 class _ConstantRoughHeadSeas:
@@ -238,3 +239,45 @@ def test_slamming_speed_is_pruned_outright_not_downranked(vessel, geo):
     # and it should be genuinely absent from the top-level candidate pool too
     result = optimise(PlanRequest(weather=rough, geography=geo, vessel=vessel, pace=100, comfort=0))
     assert all(c.speed_kn != fast_kn for c in result.candidates)
+
+
+# a real, navigable origin/destination pair entirely south of
+# CORSICA_LAT_BAND (41.3-43.0) -- every stage's centre stays in that
+# southern strip, so there's no "west/east of Corsica" concept for this
+# passage at all (ticket 0.8 amendment 3).
+FAR_FROM_CORSICA_ORIGIN = LatLon(40.80, 7.0)
+FAR_FROM_CORSICA_DESTINATION = LatLon(40.90, 8.0)
+
+
+def test_distinguishing_region_is_none_for_a_passage_nowhere_near_corsica():
+    lattice = build_lattice(FAR_FROM_CORSICA_ORIGIN, FAR_FROM_CORSICA_DESTINATION)
+    assert _distinguishing_region(lattice) is None
+
+
+def test_side_diversity_filter_is_none_when_no_distinguishing_region():
+    lattice = build_lattice(FAR_FROM_CORSICA_ORIGIN, FAR_FROM_CORSICA_DESTINATION)
+    assert _side_diversity_filter(lattice, "W") is None
+    assert _side_diversity_filter(lattice, "E") is None
+
+
+@pytest.mark.slow
+def test_optimise_does_not_crash_for_a_passage_with_no_distinguishing_region(vessel):
+    """amendment 3: optimise() must handle an origin/destination pair with
+    no Corsica-relative "side" concept gracefully -- no crash, and the
+    side-diversity mechanism simply doesn't constrain anything (there's
+    nothing to be diverse *about* for a passage that never goes near
+    Corsica)."""
+    real_geo = RealGeography()
+    wx = SyntheticWeatherField("calm")
+    result = optimise(
+        PlanRequest(
+            weather=wx,
+            geography=real_geo,
+            vessel=vessel,
+            pace=50,
+            comfort=50,
+            origin=FAR_FROM_CORSICA_ORIGIN,
+            destination=FAR_FROM_CORSICA_DESTINATION,
+        )
+    )
+    assert result.candidates

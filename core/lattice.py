@@ -9,14 +9,25 @@ Geometry matches `core/corridors.py`'s approach exactly (straight lat/lon
 interpolation + perpendicular offset in an equirectangular approximation
 anchored at `REF_LAT_DEG`) — appropriate at this ~200nm passage scale, and
 consistent with the rest of the codebase.
+
+**Adaptive refinement (ticket 0.8).** `cross_track_step_nm` is per-stage,
+not a single scalar — most of the lattice stays at the coarse default
+(cheap), but a stage whose outgoing edges are found to be poorly
+navigable (a real, scattered-hazard-field effect found empirically at
+Bonifacio — see `docs/plans/ticket-0.8.md`) gets refined to a finer local
+step, bounded to a lateral window so lane count doesn't blow up lattice-
+wide. `LANE_TURN_RATE_NM` (a physical lateral-distance turn allowance,
+not a fixed lane-*index* count) is what makes a coarse/fine stage
+boundary behave sanely — see `Lattice.turn_range`.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
-from core.geography import OPERATING_AREA_BBOX
+from core.geography import OPERATING_AREA_BBOX, Geography
+from core.legs import _navigable_along_leg
 from core.units import EARTH_NM_PER_DEG_LAT, LatLon, distance_m, interpolate_point, m_to_nm
 
 REF_LAT_DEG = 42.3
@@ -25,6 +36,45 @@ DEFAULT_ALONG_TRACK_STEP_NM = 6.0
 DEFAULT_CROSS_TRACK_STEP_NM = 5.0
 DEFAULT_CROSS_TRACK_HALF_WIDTH_NM = 80.0
 BBOX_MARGIN_NM = 3.0
+
+# Max lateral change per along-track stage, in nautical miles (not a fixed
+# lane-index count — see module docstring; this is a lattice-resolution
+# parameter bounding how far apart two consecutive waypoints' lateral
+# offsets can be, not a vessel kinematic limit — the vessel steers each
+# leg at its own heading regardless, same as any course change between
+# waypoints). Originally ported from the prior fixed-index-count turn
+# rate (+-2 lanes at the 5nm default step ~= 10nm) when converting to
+# distance for ticket 0.8's per-stage resolution. 15nm, not 10nm: found
+# empirically that 10nm was exactly too tight to let a route pushed west
+# through the Bonifacio reef field curve back to the destination approach
+# in the few remaining stages before Porto Cervo (threshold was between
+# 11-12nm; 15nm gives real margin, not a value sitting right on the edge
+# of a real route becoming infeasible again) — see
+# docs/plans/ticket-0.8.md.
+LANE_TURN_RATE_NM = 15.0
+
+# Adaptive refinement tuning (ticket 0.8). 0.75, not a round 0.7 or 0.8 --
+# found empirically that Bonifacio's real worst coarse-resolution stage
+# sits at exactly 0.700 (see docs/plans/ticket-0.8.md), which a `< 0.7`
+# threshold misses entirely by sitting right on the boundary; 0.75 gives
+# it real margin without being so aggressive it refines stages that are
+# only trivially imperfect (the 0.95-0.99 stages nearby, real GSHHG
+# fidelity noise rather than an actual constraint).
+DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION = 0.75
+DEFAULT_MAX_REFINEMENT_PASSES = 3
+DEFAULT_MIN_REFINEMENT_STEP_NM = 0.5
+REFINEMENT_STEP_FACTOR = 4.0
+
+
+@dataclass(frozen=True)
+class RefinementDiagnostic:
+    """A stage whose outgoing edges were still below
+    `min_navigable_edge_fraction` after refinement hit its pass/floor
+    limit — visible, not silently accepted (amendment 2)."""
+
+    stage: int
+    final_step_nm: float
+    navigable_edge_fraction: float
 
 
 @dataclass(frozen=True)
@@ -39,14 +89,60 @@ class Lattice:
     # objects already hand-tuned per corridor; here it falls out of the bbox
     # geometry automatically instead.
     max_lane_per_stage: tuple[int, ...]
-    cross_track_step_nm: float
+    cross_track_step_nm: tuple[float, ...]
+    refinement_diagnostics: tuple[RefinementDiagnostic, ...] = field(default_factory=tuple)
 
     @property
     def n_stages(self) -> int:
         return len(self.stage_centres)
 
     def point(self, stage: int, lane: int) -> LatLon:
-        return _offset_point(self.stage_centres, stage, lane, self.cross_track_step_nm)
+        return _offset_point(self.stage_centres, stage, lane, self.cross_track_step_nm[stage])
+
+    def turn_range(self, from_stage: int, from_lane: int) -> range:
+        """Lane-index range reachable at `from_stage + 1` from `from_lane`,
+        given the fixed *physical* lateral turn allowance
+        `LANE_TURN_RATE_NM`. The one place this computation happens —
+        `core/isochrone.py` and `core/optimiser.py` both call this rather
+        than each re-deriving it (they're meant to be identical, same
+        precedent as `core/legs.py`'s shared hard-constraint semantics).
+        See `_turn_range` for why it's physical-position-based, not
+        lane-index arithmetic."""
+        return _turn_range(self.cross_track_step_nm, self.max_lane_per_stage, from_stage, from_lane)
+
+
+def _turn_range(
+    steps: tuple[float, ...] | list[float],
+    max_lane_per_stage: tuple[int, ...] | list[int],
+    from_stage: int,
+    from_lane: int,
+) -> range:
+    """Lane-index range at `from_stage + 1` within `LANE_TURN_RATE_NM` of
+    `from_lane`, computed in physical lateral position (`lane * that
+    stage's own step`) rather than lane-index arithmetic — index deltas
+    only mean the same physical distance when both stages share one step.
+    An earlier version used the *finer* of the two steps to compute an
+    index-count range and applied that same *index* range at the
+    *coarser* stage — which silently grants a much larger-than-intended
+    physical turn at the coarse end (found empirically: it let an
+    east-side search wander through an adaptively-refined fine stage and
+    back out at a coarse neighbour with an effectively unbounded turn,
+    corrupting east-side routing that used to work fine before adaptive
+    refinement existed at all — see docs/plans/ticket-0.8.md). Converting
+    through physical position is correct regardless of which side of the
+    boundary is finer. Free function (not a `Lattice` method) so
+    `build_lattice`'s refinement pass can call it on the working
+    (not-yet-a-`Lattice`) `steps`/`max_lane_per_stage` lists it's still
+    mutating — `Lattice.turn_range` is a thin wrapper over this once the
+    lattice is built."""
+    to_stage = from_stage + 1
+    from_step = steps[from_stage]
+    to_step = steps[to_stage]
+    from_physical_nm = from_lane * from_step
+    next_max_lane = max_lane_per_stage[to_stage]
+    lo = max(-next_max_lane, math.ceil((from_physical_nm - LANE_TURN_RATE_NM) / to_step))
+    hi = min(next_max_lane, math.floor((from_physical_nm + LANE_TURN_RATE_NM) / to_step))
+    return range(lo, hi + 1)
 
 
 def _offset_point(
@@ -78,13 +174,84 @@ def _within_bbox_with_margin(lat_deg: float, lon_deg: float, margin_deg: float) 
     )
 
 
+def _stage_max_lane(
+    stage_centres: tuple[LatLon, ...],
+    stage: int,
+    step_nm: float,
+    cross_track_half_width_nm: float,
+    margin_deg: float,
+) -> int:
+    requested_max_lane = max(1, round(cross_track_half_width_nm / step_nm))
+    stage_max = 0
+    for lane in range(1, requested_max_lane + 1):
+        p_pos = _offset_point(stage_centres, stage, lane, step_nm)
+        p_neg = _offset_point(stage_centres, stage, -lane, step_nm)
+        if not (
+            _within_bbox_with_margin(p_pos.lat_deg, p_pos.lon_deg, margin_deg)
+            and _within_bbox_with_margin(p_neg.lat_deg, p_neg.lon_deg, margin_deg)
+        ):
+            break
+        stage_max = lane
+    return stage_max
+
+
+def _outgoing_edge_navigable_fraction(
+    stage_centres: tuple[LatLon, ...],
+    steps: list[float],
+    max_lane_per_stage: list[int],
+    stage: int,
+    geography: Geography,
+) -> float:
+    """Fraction of (lane at `stage`) x (turn-reachable lane at `stage+1`)
+    pairs that are actually leg-navigable — the same edge-level signal
+    this ticket's investigation checked by hand (point navigability alone
+    understates a scattered-islet field: two endpoints can each be clear
+    water with real hazards on the straight line between them).
+
+    Computed *separately* for the west half (lane <= 0) and east half
+    (lane >= 0) of the stage, returning the worse of the two — found
+    empirically to matter: Bonifacio's degradation is asymmetric (the
+    west half is materially worse than the east), and averaging over the
+    whole stage diluted the signal below any reasonable threshold,
+    triggering no refinement at all where it was actually needed."""
+
+    def half_fraction(lanes: range) -> float:
+        total = 0
+        navigable = 0
+        for lane in lanes:
+            p = _offset_point(stage_centres, stage, lane, steps[stage])
+            if not geography.is_navigable(p.lat_deg, p.lon_deg):
+                continue
+            for next_lane in _turn_range(steps, max_lane_per_stage, stage, lane):
+                q = _offset_point(stage_centres, stage + 1, next_lane, steps[stage + 1])
+                if not geography.is_navigable(q.lat_deg, q.lon_deg):
+                    continue
+                total += 1
+                if _navigable_along_leg(p, q, geography):
+                    navigable += 1
+        # No navigable starting lane on this half at all -> refinement
+        # can't help (finer sampling of dry land is still dry land); that
+        # is core/optimiser.py's side-diversity fix's job, not this one's
+        # — don't force a refinement pass over it.
+        return 1.0 if total == 0 else navigable / total
+
+    west = half_fraction(range(-max_lane_per_stage[stage], 1))
+    east = half_fraction(range(0, max_lane_per_stage[stage] + 1))
+    return min(west, east)
+
+
 def build_lattice(
     origin: LatLon,
     destination: LatLon,
     *,
+    geography: Geography | None = None,
+    adaptive_refinement: bool = True,
     along_track_step_nm: float = DEFAULT_ALONG_TRACK_STEP_NM,
     cross_track_step_nm: float = DEFAULT_CROSS_TRACK_STEP_NM,
     cross_track_half_width_nm: float = DEFAULT_CROSS_TRACK_HALF_WIDTH_NM,
+    min_navigable_edge_fraction: float = DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
+    max_refinement_passes: int = DEFAULT_MAX_REFINEMENT_PASSES,
+    min_refinement_step_nm: float = DEFAULT_MIN_REFINEMENT_STEP_NM,
 ) -> Lattice:
     """Build the open lattice, clipping the requested half-width down to
     whatever actually stays inside `OPERATING_AREA_BBOX` (with margin) at
@@ -92,6 +259,20 @@ def build_lattice(
     follow-up: the lattice itself never asks `RealGeography` for a point
     outside the area real data covers, so `OutOfOperatingAreaError` is a
     pure defensive backstop, not something normal operation should trip.
+
+    Adaptive refinement (ticket 0.8) runs when `geography` is given and
+    `adaptive_refinement` is true (both are opt-outable — tests that don't
+    care about real-geography fidelity, or that construct a lattice before
+    any `Geography` is available, get the pre-0.8 uniform-step behaviour
+    by just not passing `geography`). Each stage's *own* outgoing edge
+    (to `stage + 1`) is probed; below `min_navigable_edge_fraction`, that
+    stage's step is refined (divided by `REFINEMENT_STEP_FACTOR`) and
+    re-probed, repeating up to `max_refinement_passes` or until
+    `min_refinement_step_nm` is reached, whichever binds first. A stage
+    still below threshold at that limit is recorded in
+    `Lattice.refinement_diagnostics`, not silently accepted (amendment 2)
+    — the search itself already handles a genuinely-impassable region by
+    finding no path there, same as it always has for any hazard.
     """
     total_nm = m_to_nm(distance_m(origin, destination, REF_LAT_DEG))
     n_stages = max(2, round(total_nm / along_track_step_nm) + 1)
@@ -99,27 +280,45 @@ def build_lattice(
         interpolate_point(origin, destination, i / (n_stages - 1)) for i in range(n_stages)
     )
 
-    requested_max_lane = max(1, round(cross_track_half_width_nm / cross_track_step_nm))
     margin_deg = BBOX_MARGIN_NM / EARTH_NM_PER_DEG_LAT
+    steps = [cross_track_step_nm] * n_stages
+    max_lane_per_stage = [
+        _stage_max_lane(stage_centres, i, steps[i], cross_track_half_width_nm, margin_deg)
+        for i in range(n_stages)
+    ]
 
-    max_lane_per_stage = []
-    for i in range(n_stages):
-        stage_max = 0
-        for lane in range(1, requested_max_lane + 1):
-            p_pos = _offset_point(stage_centres, i, lane, cross_track_step_nm)
-            p_neg = _offset_point(stage_centres, i, -lane, cross_track_step_nm)
-            if not (
-                _within_bbox_with_margin(p_pos.lat_deg, p_pos.lon_deg, margin_deg)
-                and _within_bbox_with_margin(p_neg.lat_deg, p_neg.lon_deg, margin_deg)
+    diagnostics: list[RefinementDiagnostic] = []
+    if geography is not None and adaptive_refinement:
+        for stage in range(n_stages - 1):
+            passes = 0
+            frac = _outgoing_edge_navigable_fraction(
+                stage_centres, steps, max_lane_per_stage, stage, geography
+            )
+            while (
+                frac < min_navigable_edge_fraction
+                and passes < max_refinement_passes
+                and steps[stage] > min_refinement_step_nm
             ):
-                break
-            stage_max = lane
-        max_lane_per_stage.append(stage_max)
+                steps[stage] = max(min_refinement_step_nm, steps[stage] / REFINEMENT_STEP_FACTOR)
+                max_lane_per_stage[stage] = _stage_max_lane(
+                    stage_centres, stage, steps[stage], cross_track_half_width_nm, margin_deg
+                )
+                frac = _outgoing_edge_navigable_fraction(
+                    stage_centres, steps, max_lane_per_stage, stage, geography
+                )
+                passes += 1
+            if frac < min_navigable_edge_fraction:
+                diagnostics.append(
+                    RefinementDiagnostic(
+                        stage=stage, final_step_nm=steps[stage], navigable_edge_fraction=frac
+                    )
+                )
 
     return Lattice(
         origin=origin,
         destination=destination,
         stage_centres=stage_centres,
         max_lane_per_stage=tuple(max_lane_per_stage),
-        cross_track_step_nm=cross_track_step_nm,
+        cross_track_step_nm=tuple(steps),
+        refinement_diagnostics=tuple(diagnostics),
     )

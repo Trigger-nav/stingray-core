@@ -14,10 +14,16 @@ satisfy the same `Geography` protocol, so `optimiser.py`/`twin.py` never
 depend on which one is in use.
 
 Explicit scope boundary (see the ticket 0.3 plan): this only sources real
-land + depth *data*. `depth_m` is not yet wired into the optimiser as a
-hard constraint (that's ticket 0.8, same as A5's land/no-go pruning note
-says for minimum depth), and the marine-reserve `NOGO` boxes stay synthetic
-placeholders pending 0.8's real chart-derived no-go polygons.
+land + depth *data*. `depth_m` is wired into the optimiser as a hard
+constraint starting ticket 0.8 (`core/legs.py`), same as land/no-go (A5).
+
+**Ticket 0.8:** `RealGeography` loads real (if not yet precisely-verified
+— see each zone's `precise_boundary_verified` flag) no-go + TSS
+separation-zone polygons from `data/geography/nogo_western_med.json` and
+`tss_western_med.json`, replacing the synthetic `NOGO` boxes below for
+real-geography use. `SyntheticGeography` keeps using the synthetic `NOGO`
+list unchanged — it's a deterministic fixture for optimiser tests, not
+meant to track real data.
 """
 
 from __future__ import annotations
@@ -154,7 +160,10 @@ LAND: dict[str, list[tuple[float, float]]] = {
     "pianosa": [(42.36, 10.08), (42.34, 10.10), (42.33, 10.06)],
 }
 
-# Marine-reserve routing exclusions (advisory no-go, not land).
+# Marine-reserve routing exclusions (advisory no-go, not land) --
+# SyntheticGeography only; RealGeography loads real (if not yet
+# precisely-verified) zones from data/geography/nogo_western_med.json
+# instead (ticket 0.8).
 NOGO: list[dict] = [
     {
         "name": "Reserve de Scandola",
@@ -172,6 +181,9 @@ NOGO: list[dict] = [
     },
 ]
 
+DEFAULT_NOGO_PATH = "data/geography/nogo_western_med.json"
+DEFAULT_TSS_PATH = "data/geography/tss_western_med.json"
+
 
 def _check_in_bounds(lat_deg: float, lon_deg: float) -> None:
     lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
@@ -182,10 +194,26 @@ def _check_in_bounds(lat_deg: float, lon_deg: float) -> None:
         )
 
 
-def _is_nogo(lat: float, lon: float) -> bool:
+def _is_nogo_synthetic(lat: float, lon: float) -> bool:
     return any(
         b["lat_min"] <= lat <= b["lat_max"] and b["lon_min"] <= lon <= b["lon_max"] for b in NOGO
     )
+
+
+def _load_nogo_polygons(*paths: str | Path) -> list[list[tuple[float, float]]]:
+    """Loads zone polygons from one or more data files matching
+    `data/geography/nogo_western_med.json`'s schema (a `"zones"` list,
+    each with a `"polygon"` of `[lat, lon]` vertices) — used for both the
+    no-go and TSS-separation-zone files, since they're the exact same
+    hard-constraint mechanism (ticket 0.8's deliberate scope cut: a
+    separation zone is a no-go, not a directional-lane rule)."""
+    polygons: list[list[tuple[float, float]]] = []
+    for path in paths:
+        with open(path) as f:
+            data = json.load(f)
+        for zone in data["zones"]:
+            polygons.append([(lat, lon) for lat, lon in zone["polygon"]])
+    return polygons
 
 
 def _point_in_polygon(lat: float, lon: float, poly: list[tuple[float, float]]) -> bool:
@@ -229,7 +257,7 @@ class SyntheticGeography:
         return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in LAND.values())
 
     def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
-        return _is_nogo(lat_deg, lon_deg)
+        return _is_nogo_synthetic(lat_deg, lon_deg)
 
     def is_navigable(self, lat_deg: float, lon_deg: float) -> bool:
         return not (self.is_land(lat_deg, lon_deg) or self.is_nogo(lat_deg, lon_deg))
@@ -263,24 +291,30 @@ DEFAULT_BATHYMETRY_PATH = "data/geography/bathymetry_western_med.npz"
 
 class RealGeography:
     """GSHHG coastline + GEBCO_2024 bathymetry over the western-Med corridor
-    bbox (ticket 0.3). Loads two committed, pre-cropped data files produced
-    by `ingest/fetch_gshhg.py`/`ingest/fetch_gebco.py` — no network, no
-    shapefile/netCDF parsing at runtime, just `json` + `numpy`.
+    bbox (ticket 0.3). Loads committed, pre-cropped data files produced by
+    `ingest/fetch_gshhg.py`/`ingest/fetch_gebco.py`/`ingest/fetch_nogo_polygons.py`
+    — no network, no shapefile/netCDF parsing at runtime, just `json` +
+    `numpy`.
 
-    `NOGO` reserve boxes are still the synthetic placeholder (see module
-    docstring) — real chart-derived no-go polygons are ticket 0.8.
+    No-go + TSS separation zones (ticket 0.8) are real (if not yet
+    precisely-verified — see each zone's `precise_boundary_verified` flag
+    in the data files) polygons loaded from `nogo_path`/`tss_path`, not
+    the synthetic `NOGO` boxes `SyntheticGeography` still uses.
     """
 
     def __init__(
         self,
         coastline_path: str | Path = DEFAULT_COASTLINE_PATH,
         bathymetry_path: str | Path = DEFAULT_BATHYMETRY_PATH,
+        nogo_path: str | Path = DEFAULT_NOGO_PATH,
+        tss_path: str | Path = DEFAULT_TSS_PATH,
     ) -> None:
         with open(coastline_path) as f:
             coastline = json.load(f)
         self._land_polygons: list[list[tuple[float, float]]] = [
             [(lat, lon) for lat, lon in poly] for poly in coastline["polygons"]
         ]
+        self._nogo_polygons = _load_nogo_polygons(nogo_path, tss_path)
 
         grid = np.load(bathymetry_path)
         self._lat0 = float(grid["lat0"])
@@ -312,7 +346,7 @@ class RealGeography:
         return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in self._land_polygons)
 
     def is_nogo(self, lat_deg: float, lon_deg: float) -> bool:
-        return _is_nogo(lat_deg, lon_deg)
+        return any(_point_in_polygon(lat_deg, lon_deg, poly) for poly in self._nogo_polygons)
 
     def is_navigable(self, lat_deg: float, lon_deg: float) -> bool:
         return not (self.is_land(lat_deg, lon_deg) or self.is_nogo(lat_deg, lon_deg))

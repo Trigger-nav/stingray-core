@@ -64,8 +64,8 @@ from dataclasses import dataclass
 
 from core.corridors import PORTS, REF_LAT_DEG, Corridor, corridor_east, corridor_west, offset_point
 from core.geography import Geography
-from core.isochrone import LANE_TURN_RATE, reachable_within
-from core.lattice import Lattice, build_lattice
+from core.isochrone import reachable_within
+from core.lattice import LANE_TURN_RATE_NM, Lattice, build_lattice
 from core.legs import evaluate_leg, leg_navigation
 from core.twin import VesselTwin, calm_power_kw
 from core.units import LatLon, distance_m, kn_to_ms, m_to_nm, ms_to_kn
@@ -274,6 +274,49 @@ def _route_signature(track: tuple[LatLon, ...]) -> str:
     return "W" if mean_lon < CORSICA_REF_LON else "E"
 
 
+def _distinguishing_region(lattice: Lattice) -> tuple[int, int] | None:
+    """Stage-index range (inclusive) whose centre falls within Corsica's
+    latitude band — the same geometry `_route_signature` uses to classify
+    a track's side, reused here rather than reinvented. `None` if no stage
+    falls in that band (ticket 0.8 amendment 3: an arbitrary origin/
+    destination pair nowhere near Corsica has no "west/east of Corsica"
+    concept at all) — callers must treat `None` as "no constraint", not an
+    empty-but-still-enforced range."""
+    lat_min, lat_max = CORSICA_LAT_BAND
+    stages_in_band = [
+        i for i, p in enumerate(lattice.stage_centres) if lat_min <= p.lat_deg <= lat_max
+    ]
+    if not stages_in_band:
+        return None
+    return min(stages_in_band), max(stages_in_band)
+
+
+def _side_diversity_filter(lattice: Lattice, side: str):
+    """`lane_filter(stage, next_lane) -> bool` requiring `side` only while
+    the transition lands *inside* the distinguishing region (where "west/
+    east of Corsica" is a meaningful constraint) — unconstrained
+    everywhere else, so the route can legitimately curve back toward/past
+    the centreline approaching either endpoint. Ticket 0.8: the previous
+    version constrained every stage identically, which — for the real
+    Antibes/Porto Cervo passage — forced the west-side search through real
+    Sardinian coastline right at the destination's approach (see
+    docs/plans/ticket-0.8.md), nothing to do with routing around Corsica.
+    Returns `None` (no filter — `_lattice_search` reads that as
+    unconstrained) when `_distinguishing_region` finds no such region."""
+    region = _distinguishing_region(lattice)
+    if region is None:
+        return None
+    lo_stage, hi_stage = region
+    keep_sign = (lambda lane: lane >= 0) if side == "E" else (lambda lane: lane <= 0)
+
+    def lane_filter(stage: int, next_lane: int) -> bool:
+        if lo_stage <= stage + 1 <= hi_stage:
+            return keep_sign(next_lane)
+        return True
+
+    return lane_filter
+
+
 def _build_leg_targets(
     track: tuple[LatLon, ...],
     stw_ms_per_leg: list[float],
@@ -377,7 +420,16 @@ def _lattice_search(
 ) -> tuple[State, dict[State, _SearchNode], dict[State, tuple[State, float, int]]] | None:
     """A* (or, with `use_heuristic=False`, an equivalent exhaustive
     Dijkstra/DP sweep) over the time-expanded lattice. Returns
-    (goal_state, nodes_by_state, predecessor) or None if unreachable."""
+    (goal_state, nodes_by_state, predecessor) or None if unreachable.
+
+    `lane_filter(stage, next_lane) -> bool`, if given, is checked at every
+    transition *into* `next_lane` at `stage + 1` (ticket 0.8: the filter
+    needs `stage` -- a side-diversity constraint that ignores which stage
+    it's applied at ends up forcing the route through whatever real
+    geography happens to sit on the wrong side of the centreline right at
+    the destination's approach, not just "mid-passage west/east of
+    Corsica" as intended — see `_side_diversity_filter`)."""
+    depth_exempt_points = (lattice.origin, lattice.destination)
     max_speed_kn = max(speeds_kn)
     destination_stage = lattice.n_stages - 1
     start: State = (0, 0, 0)
@@ -404,11 +456,8 @@ def _lattice_search(
         if stage + 1 >= lattice.n_stages:
             continue
         node = best_node[state]
-        next_max_lane = lattice.max_lane_per_stage[stage + 1]
-        lane_lo = max(-next_max_lane, lane - LANE_TURN_RATE)
-        lane_hi = min(next_max_lane, lane + LANE_TURN_RATE)
-        for next_lane in range(lane_lo, lane_hi + 1):
-            if lane_filter is not None and not lane_filter(next_lane):
+        for next_lane in lattice.turn_range(stage, lane):
+            if lane_filter is not None and not lane_filter(stage, next_lane):
                 continue
             if reachable is not None and (stage + 1, next_lane) not in reachable:
                 continue
@@ -417,9 +466,17 @@ def _lattice_search(
                 stw_ms = kn_to_ms(speed_kn)
                 for active_engines in engine_configs:
                     leg = evaluate_leg(
-                        p, q, stw_ms, node.elapsed_h, weather, geography, twin, active_engines
+                        p,
+                        q,
+                        stw_ms,
+                        node.elapsed_h,
+                        weather,
+                        geography,
+                        twin,
+                        active_engines,
+                        depth_exempt_points=depth_exempt_points,
                     )
-                    if not leg.navigable or leg.slam_event or leg.overload:
+                    if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
                         continue
                     leg_cost = (
                         weights.fuel_eur_per_kg * leg.fuel_kg
@@ -573,6 +630,7 @@ def _dp_route(
     weights: Weights,
     t0_h: float,
 ) -> dict | None:
+    depth_exempt_points = (corridor.points[0], corridor.points[-1])
     states: dict[int, dict] = {
         0: {
             "cost": 0.0,
@@ -595,8 +653,18 @@ def _dp_route(
                 if abs(pk - k) > 1:
                     continue
                 p = offset_point(corridor, i - 1, pk)
-                leg = evaluate_leg(p, q, stw_ms, s["t"], weather, geography, twin, active_engines)
-                if not leg.navigable:  # A5: hard prune, never costed
+                leg = evaluate_leg(
+                    p,
+                    q,
+                    stw_ms,
+                    s["t"],
+                    weather,
+                    geography,
+                    twin,
+                    active_engines,
+                    depth_exempt_points=depth_exempt_points,
+                )
+                if not leg.navigable or not leg.depth_ok:  # A5/0.8: hard prune, never costed
                     continue
                 if leg.slam_event or leg.overload:  # B5: hard prune, never costed
                     continue
@@ -656,23 +724,23 @@ def _baseline_route(
     routed via the open lattice search — not a straight centreline walk,
     and not `corridor_west`.
 
-    Why not corridor_west (found during ticket 0.4 review): its D->D2
-    waypoint segment cuts directly across the real Bonifacio Strait / Iles
-    Lavezzi archipelago — dozens of scattered granite islets between
-    Corsica and Sardinia (CLAUDE.md's Bonifacio Strait gotcha; see also
-    `core/corridors.py`'s `corridor_west` docstring). Under `RealGeography`
-    it is infeasible at *every* speed/engine combination — verified by
-    widening its lateral-offset allowance to +-5 lanes and turn-rate to
-    +-3, which still finds no path (a two-waypoint straight-line segment
-    just doesn't thread a scattered reef field). Properly routing this
-    strait needs the real TSS lane geometry and chart-derived no-go data —
-    that's ticket 0.8's job, not something to improvise here from raw
-    coastline polygons. The lattice search already reliably finds a
-    feasible route through this exact area (that's the point of ticket
-    0.4), so it backs the baseline too, at a fixed reference speed/config
-    rather than letting mission weights pick the "best" one — still a
-    do-nothing reference, not a recommendation. Provisional (B3) until
-    ticket 0.7 regardless of any of the above.
+    Why not corridor_west: at the time this was written (ticket 0.4
+    review), its D->D2 waypoint segment near the real Bonifacio Strait /
+    Iles Lavezzi archipelago was infeasible under `RealGeography` at every
+    speed/engine combination tried (CLAUDE.md's Bonifacio Strait gotcha;
+    see also `core/corridors.py`'s `corridor_west` docstring) — that was
+    against the synthetic placeholder no-go box `RealGeography` used
+    before ticket 0.8, and `corridor_west` is feasible again under
+    `RealGeography` now that ticket 0.8's real no-go geometry replaced it
+    (see that corridor's docstring for the finding). This function still
+    backs the baseline with the lattice search regardless: it's the
+    primary/more-thorough search (that's the point of ticket 0.4), so
+    using it here at a fixed reference speed/config — rather than letting
+    mission weights pick the "best" one, or coupling the baseline's
+    feasibility to whichever legacy corridor happens to be threadable
+    today — keeps this a genuine do-nothing reference, not a
+    recommendation. Provisional (B3) until ticket 0.7 regardless of any of
+    the above.
 
     `reachable` is an isochrone pre-pass over a *generous* horizon — an
     unpruned lattice search is dramatically slower, so this must not be
@@ -798,7 +866,10 @@ def optimise(request: PlanRequest) -> PlanResult:
     candidates_all: list[Candidate] = []
 
     # --- Ticket 0.4: open lattice search (primary path) ---
-    lattice = build_lattice(request.origin, request.destination)
+    # geography=request.geography (ticket 0.8): without it, build_lattice
+    # skips adaptive refinement entirely -- it has nothing to probe
+    # navigability against.
+    lattice = build_lattice(request.origin, request.destination, geography=request.geography)
     horizon_h = (
         request.latest_arrival_h if request.latest_arrival_h is not None else DEFAULT_HORIZON_H
     )
@@ -858,12 +929,16 @@ def optimise(request: PlanRequest) -> PlanResult:
                 request.latest_arrival_h,
             )
         )
-        # opposite-side candidate for diversity — lane sign correlates with
-        # side (west corridor waypoints all had negative cross-track offset
-        # relative to the direct line, east corridor all positive).
-        opposite_filter = (
-            (lambda lane: lane <= 0) if primary["side"] == "E" else (lambda lane: lane >= 0)
-        )
+        # opposite-side candidate for diversity — constrained only inside
+        # the Corsica-spanning "distinguishing region" (ticket 0.8's
+        # _side_diversity_filter), not at every stage: forcing a fixed
+        # lane sign across the *whole* passage used to walk the search
+        # straight into real coastline right at the destination's
+        # approach, nothing to do with routing around Corsica. `None`
+        # (no distinguishing region for this origin/destination pair) is
+        # a valid, unconstrained filter, not an error.
+        opposite_side = "W" if primary["side"] == "E" else "E"
+        opposite_filter = _side_diversity_filter(lattice, opposite_side)
         secondary = _lattice_route_result(
             lattice,
             reachable,
@@ -898,14 +973,19 @@ def optimise(request: PlanRequest) -> PlanResult:
             # only, with nothing telling the caller why the W option never
             # shows up.
             missing_side = "W" if primary["side"] == "E" else "E"
+            step_range = (
+                f"{min(lattice.cross_track_step_nm):.2f}-{max(lattice.cross_track_step_nm):.2f}nm"
+                if len(set(lattice.cross_track_step_nm)) > 1
+                else f"{lattice.cross_track_step_nm[0]:.0f}nm"
+            )
             diagnostics.append(
                 PruneDiagnostic(
                     code="route_side_unreachable",
                     message=(
                         f"No feasible {missing_side}-side route found at the current lattice "
-                        f"resolution (cross-track step {lattice.cross_track_step_nm:.0f}nm, "
-                        f"+-{LANE_TURN_RATE} lanes/stage) — see ROADMAP.md ticket 0.8's fine "
-                        f"lattice refinement note."
+                        f"resolution (cross-track step {step_range}, "
+                        f"+-{LANE_TURN_RATE_NM:.0f}nm/stage turn allowance) — see "
+                        f"ROADMAP.md ticket 0.8."
                     ),
                     side=missing_side,
                 )

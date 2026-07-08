@@ -9,7 +9,12 @@ def _base_dict():
     return {
         "name": "test vessel",
         "provisional": True,
-        "hull": {"length_wl_m": 45.0, "beam_wl_m": 9.0, "block_coefficient": 0.52},
+        "hull": {
+            "length_wl_m": 45.0,
+            "beam_wl_m": 9.0,
+            "block_coefficient": 0.52,
+            "draft_m": 2.5,
+        },
         "calm_resistance": {
             "linear_coefficient": 5.0,
             "cubic_coefficient": 1.0,
@@ -64,6 +69,7 @@ def _base_dict():
             "single_engine_wear_bonus": 0.15,
             "load_cycling_limit": None,
         },
+        "min_under_keel_clearance_m": 2.0,
     }
 
 

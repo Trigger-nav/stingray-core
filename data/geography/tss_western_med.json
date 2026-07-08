@@ -1,0 +1,16 @@
+{
+  "source": "PLACEHOLDER -- not sourced from a published IMO routeing system or chart. Real, precise Bonifacio Strait TSS lane/separation-zone coordinates were not obtainable from a free, verified source in this session (WDPA needs a signup token; EEA WFS and OSM/Overpass seamark data needed more query iteration than resolved live -- see docs/plans/ticket-0.8.md's 'Real-data sourcing' section). This zone exists to exercise the separation-zone hard-constraint mechanism with a geometrically-plausible placeholder, not to represent the real IMO-adopted scheme.",
+  "scope_note": "Separation ZONE only (a no-go polygon, reusing the exact same hard-constraint mechanism as data/geography/nogo_western_med.json) -- directional LANE compliance (which side, which heading, COLREG Rule 10) is deliberately NOT modelled this ticket. See ROADMAP.md ticket 0.8 and CLAUDE.md's Bonifacio gotcha for the follow-up once real lane geometry is sourced.",
+  "zones": [
+    {
+      "name": "Bonifacio Strait separation zone (placeholder)",
+      "precise_boundary_verified": false,
+      "polygon": [
+        [41.36, 9.00],
+        [41.36, 9.12],
+        [41.40, 9.12],
+        [41.40, 9.00]
+      ]
+    }
+  ]
+}

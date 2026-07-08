@@ -44,6 +44,14 @@ from core.weather import WeatherField, WeatherSample
 # are just racing at different resolutions.
 NAVIGABILITY_SAMPLE_INTERVAL_NM = 0.25
 
+# Minimum-depth pilotage exemption (ticket 0.8): the last stretch of track
+# into a declared origin/destination is a captain/local-knowledge job, not
+# this optimiser's -- ports and anchorages are frequently in nearshore
+# water that doesn't meet a generic open-water margin (B6's
+# `_validate_endpoint` already owns endpoint depth plausibility). Depth-
+# only: land/no-go checks still apply within this radius.
+DEPTH_EXEMPT_RADIUS_NM = 1.5
+
 
 @dataclass
 class LegResult:
@@ -53,6 +61,7 @@ class LegResult:
     wear: float
     max_hs: float
     navigable: bool
+    depth_ok: bool
     slam_event: bool
     overload: bool
 
@@ -115,6 +124,36 @@ def _navigable_along_leg(p: LatLon, q: LatLon, geography: Geography) -> bool:
     )
 
 
+@lru_cache(maxsize=200_000)
+def _leg_depth_ok(
+    p: LatLon,
+    q: LatLon,
+    geography: Geography,
+    min_depth_m: float,
+    exempt_points: tuple[LatLon, ...],
+) -> bool:
+    """Same fixed-distance sampling as `_navigable_along_leg` (a separate
+    pass, not merged into it, for one-responsibility-per-function clarity
+    -- negligible extra cost, since both are memoised per unique (p, q)
+    edge regardless of how many speed/engine combinations evaluate it).
+    Samples within `DEPTH_EXEMPT_RADIUS_NM` of any `exempt_points` entry
+    (a declared origin/destination) skip the depth check -- pilotage
+    scope, see the module-level constant's docstring. Land/no-go is
+    unaffected; this is depth-only."""
+    leg_distance_nm = m_to_nm(distance_m(p, q, REF_LAT_DEG))
+    n_samples = max(1, math.ceil(leg_distance_nm / NAVIGABILITY_SAMPLE_INTERVAL_NM))
+    for i in range(1, n_samples + 1):
+        pt = interpolate_point(p, q, i / n_samples)
+        if any(
+            m_to_nm(distance_m(pt, ep, REF_LAT_DEG)) <= DEPTH_EXEMPT_RADIUS_NM
+            for ep in exempt_points
+        ):
+            continue
+        if geography.depth_m(pt.lat_deg, pt.lon_deg) < min_depth_m:
+            return False
+    return True
+
+
 def evaluate_leg(
     p: LatLon,
     q: LatLon,
@@ -124,15 +163,21 @@ def evaluate_leg(
     geography: Geography,
     twin: VesselTwin,
     active_engines: int,
+    depth_exempt_points: tuple[LatLon, ...] = (),
 ) -> LegResult:
-    """Full leg costing: fuel/comfort/wear at commanded STW, plus the two
-    hard-constraint checks (A5 land/no-go via `navigable`, B5 wear-policy
-    via `slam_event`/`overload`) every search (production A*, DP fallback,
-    isochrone pre-pass/oracle) prunes on identically."""
+    """Full leg costing: fuel/comfort/wear at commanded STW, plus the hard-
+    constraint checks (A5 land/no-go via `navigable`, minimum depth via
+    `depth_ok` -- ticket 0.8, B5 wear-policy via `slam_event`/`overload`)
+    every search (production A*, DP fallback, isochrone pre-pass/oracle)
+    prunes on identically. `depth_exempt_points` is normally a request's
+    real origin/destination (`Lattice.origin`/`.destination`, or a
+    corridor's first/last waypoint) -- see `_leg_depth_ok`."""
     nav = leg_navigation(p, q, stw_ms, t0_h, weather)
     w = nav.weather_sample
 
     navigable = _navigable_along_leg(p, q, geography)
+    min_depth_m = twin.spec.hull.draft_m + twin.spec.min_under_keel_clearance_m
+    depth_ok = _leg_depth_ok(p, q, geography, min_depth_m, depth_exempt_points)
 
     fuel_result = twin.fuel_rate(
         v_ms=stw_ms, weather=w, heading_deg=nav.course_deg, active_engines=active_engines
@@ -153,6 +198,7 @@ def evaluate_leg(
         wear=wear_result.wear_rate_per_h * nav.duration_h,
         max_hs=w.hs_m,
         navigable=navigable,
+        depth_ok=depth_ok,
         slam_event=wear_result.slam_event,
         overload=wear_result.overload,
     )
