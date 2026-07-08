@@ -39,9 +39,17 @@ ingest = [
     # real run, missing from the original ticket 0.5 declaration.
     "scipy>=1.11",
 ]
+# fit/-only: twin parameter fitting (ticket 0.6) needs real nonlinear
+# least-squares (scipy.optimize) -- core/ stays numpy+PyYAML only (see
+# above), and this is a different concern from ingest/'s network data
+# acquisition, so it's its own extras group rather than folded into
+# `ingest` (which happens to already carry scipy for an unrelated reason).
+fit = [
+    "scipy>=1.11",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "ingest"]
+packages = ["core", "ingest", "fit"]
 
 [tool.ruff]
 line-length = 100
