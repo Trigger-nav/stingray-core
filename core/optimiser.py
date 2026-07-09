@@ -64,7 +64,7 @@ from dataclasses import dataclass
 
 from core.corridors import PORTS, REF_LAT_DEG, Corridor, corridor_east, corridor_west, offset_point
 from core.geography import Geography
-from core.isochrone import reachable_within
+from core.isochrone import arrival_times_within, arrivals_within_horizon
 from core.lattice import LANE_TURN_RATE_NM, Lattice, build_lattice
 from core.legs import evaluate_leg, leg_navigation
 from core.twin import VesselTwin, calm_power_kw
@@ -873,7 +873,23 @@ def optimise(request: PlanRequest) -> PlanResult:
     horizon_h = (
         request.latest_arrival_h if request.latest_arrival_h is not None else DEFAULT_HORIZON_H
     )
-    reachable = reachable_within(
+    # The baseline must reflect the *actual* achievable passage regardless
+    # of the requested ETA window — it's a do-nothing reference, not
+    # subject to schedule pressure. Filtering `reachable` to the request's
+    # own (possibly tight, or as a regression test deliberately does,
+    # impossibly tight) horizon would prune away the destination itself,
+    # and the baseline would come back infeasible even though a real route
+    # exists. Ticket B2 verification found this pre-pass double-counted:
+    # it used to run reachable_within() *twice* whenever horizon_h was
+    # tighter than DEFAULT_HORIZON_H (once per horizon), roughly doubling
+    # this search's cost -- itself the dominant cost in optimise() (see
+    # the weather-sampling gotcha, CLAUDE.md). One shared Dijkstra pass at
+    # max(horizon_h, DEFAULT_HORIZON_H), filtered to each horizon
+    # afterwards, is exactly equivalent (arrival_times_within's docstring
+    # has the proof) and costs one search regardless of how many horizons
+    # are needed.
+    search_horizon_h = max(horizon_h, DEFAULT_HORIZON_H)
+    arrivals = arrival_times_within(
         lattice,
         request.weather,
         request.geography,
@@ -881,29 +897,13 @@ def optimise(request: PlanRequest) -> PlanResult:
         speeds_kn,
         engine_configs,
         request.departure_t0_h,
-        horizon_h,
+        search_horizon_h,
     )
-    # The baseline must reflect the *actual* achievable passage regardless
-    # of the requested ETA window — it's a do-nothing reference, not
-    # subject to schedule pressure. Reusing `reachable` above would be
-    # wrong when the window is tight (or, as a regression test deliberately
-    # does, impossibly tight): the pre-pass would prune away the
-    # destination itself, and the baseline would come back infeasible even
-    # though a real route exists. Only recompute when the request's own
-    # horizon was actually tighter than the generous default.
+    reachable = arrivals_within_horizon(arrivals, request.departure_t0_h, horizon_h)
     baseline_reachable = (
         reachable
         if horizon_h >= DEFAULT_HORIZON_H
-        else reachable_within(
-            lattice,
-            request.weather,
-            request.geography,
-            twin,
-            speeds_kn,
-            engine_configs,
-            request.departure_t0_h,
-            DEFAULT_HORIZON_H,
-        )
+        else arrivals_within_horizon(arrivals, request.departure_t0_h, DEFAULT_HORIZON_H)
     )
 
     primary = _lattice_route_result(

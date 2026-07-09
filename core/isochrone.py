@@ -70,7 +70,7 @@ def _best_feasible_duration_h(
     return best
 
 
-def reachable_within(
+def arrival_times_within(
     lattice: Lattice,
     weather: WeatherField,
     geography: Geography,
@@ -79,27 +79,46 @@ def reachable_within(
     engine_configs: tuple[int, ...],
     t0_h: float,
     max_hours: float,
-) -> set[Node]:
-    """Nodes reachable from (stage=0, lane=0) within `max_hours`, choosing
-    the fastest *feasible* (speed, engine-config) independently per edge —
-    same per-edge minimisation as `time_optimal_route` (not just the single
-    fastest nominal speed/config: that combination can itself be infeasible
-    everywhere, e.g. an engine-overload speed, which would otherwise make
-    this wrongly prune everything). This is a conservative
-    over-approximation of what the full multi-objective search could still
-    reach — it never prunes a node reachable via *some* available choice."""
+) -> dict[Node, float]:
+    """The Dijkstra wavefront `reachable_within` is built on, exposed
+    separately so a caller needing reachable sets at *multiple* horizons
+    from the same weather/geography/speed grid can share one search
+    instead of re-running it per horizon (found during ticket B2's
+    verification: `core.optimiser.optimise` was calling `reachable_within`
+    *twice* per request whenever `latest_arrival_h` was set tighter than
+    `DEFAULT_HORIZON_H` -- once at the request's own horizon, once again
+    at the generous default for the baseline -- roughly doubling this
+    search's cost, itself the dominant cost in `optimise()` per the
+    weather-sampling gotcha above; profiled at ~1.35x total `optimise()`
+    wall time for a representative 13h window against RealGeography+real
+    weather, on top of whatever queueing contention a burst of superseded-
+    but-still-running jobs adds server-side).
+
+    Correct to share: a Dijkstra run with a larger deadline is a strict
+    superset of a tighter one's exploration -- it only ever *adds* nodes
+    the tighter deadline would have pruned, and every node's earliest
+    arrival time is unaffected by how generous the deadline is (arrival
+    times are monotonically non-decreasing along any path, so a node
+    reachable by hour X is reachable via a path whose every prefix also
+    arrives by hour X, explored identically regardless of whether the
+    deadline is X or 48h). So for any max_hours2 <= max_hours1, calling
+    this once at max_hours1 and filtering `{n: t for n, t in arrivals.items()
+    if t - t0_h <= max_hours2}` gives *exactly* what a separate call at
+    max_hours2 would have -- never an approximation.
+
+    Returns each reached node's earliest absolute arrival time (t0_h-
+    relative), not collapsed to a boolean "reached at all" the way
+    `reachable_within` returns."""
     depth_exempt_points = (lattice.origin, lattice.destination)
     start: Node = (0, 0)
     best_arrival: dict[Node, float] = {start: t0_h}
     heap: list[tuple[float, Node]] = [(t0_h, start)]
-    reachable: set[Node] = set()
     deadline_h = t0_h + max_hours
 
     while heap:
         t, node = heapq.heappop(heap)
         if t > best_arrival.get(node, float("inf")):
             continue
-        reachable.add(node)
         stage, lane = node
         if stage + 1 >= lattice.n_stages:
             continue
@@ -118,7 +137,47 @@ def reachable_within(
                 best_arrival[next_node] = arrival
                 heapq.heappush(heap, (arrival, next_node))
 
-    return reachable
+    return best_arrival
+
+
+def arrivals_within_horizon(
+    arrivals: dict[Node, float], t0_h: float, max_hours: float
+) -> set[Node]:
+    """Filters an `arrival_times_within` result to a (possibly tighter)
+    horizon -- the cheap post-filter step that makes sharing one Dijkstra
+    pass across multiple horizons correct (see that function's docstring)."""
+    deadline_h = t0_h + max_hours
+    return {node for node, t in arrivals.items() if t <= deadline_h}
+
+
+def reachable_within(
+    lattice: Lattice,
+    weather: WeatherField,
+    geography: Geography,
+    twin: VesselTwin,
+    speeds_kn: tuple[float, ...],
+    engine_configs: tuple[int, ...],
+    t0_h: float,
+    max_hours: float,
+) -> set[Node]:
+    """Nodes reachable from (stage=0, lane=0) within `max_hours`, choosing
+    the fastest *feasible* (speed, engine-config) independently per edge —
+    same per-edge minimisation as `time_optimal_route` (not just the single
+    fastest nominal speed/config: that combination can itself be infeasible
+    everywhere, e.g. an engine-overload speed, which would otherwise make
+    this wrongly prune everything). This is a conservative
+    over-approximation of what the full multi-objective search could still
+    reach — it never prunes a node reachable via *some* available choice.
+
+    A thin wrapper over `arrival_times_within` + `arrivals_within_horizon`
+    for callers that only need one horizon; `core.optimiser.optimise`
+    needs two (request window + baseline default) and calls those two
+    functions directly to share the one expensive Dijkstra pass — see
+    `arrival_times_within`'s docstring."""
+    arrivals = arrival_times_within(
+        lattice, weather, geography, twin, speeds_kn, engine_configs, t0_h, max_hours
+    )
+    return arrivals_within_horizon(arrivals, t0_h, max_hours)
 
 
 def time_optimal_route(

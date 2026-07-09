@@ -1,5 +1,6 @@
 import pytest
 
+import core.optimiser as optimiser_module
 from core.corridors import PORTS, corridor_east, corridor_west
 from core.geography import RealGeography, SyntheticGeography
 from core.isochrone import time_optimal_route
@@ -125,6 +126,35 @@ def test_pure_schedule_weights_converge_to_isochrone_time_optimal(vessel, geo):
     _, oracle_duration_h = oracle
 
     assert top.duration_h == pytest.approx(oracle_duration_h, rel=0.05)
+
+
+def test_latest_arrival_h_shares_one_isochrone_search_not_two(vessel, geo, monkeypatch):
+    """Ticket B2 verification: a real timing bug -- optimise() used to call
+    reachable_within() *twice* whenever latest_arrival_h was tighter than
+    DEFAULT_HORIZON_H (once at the request's own horizon, once again at
+    the generous default for the baseline), roughly doubling the
+    isochrone pre-pass's cost -- itself optimise()'s dominant cost per the
+    weather-sampling gotcha (CLAUDE.md) -- and pushed a constrained real-
+    browser replan past the demo's 90s poll deadline. Fixed by sharing one
+    Dijkstra pass (core.isochrone.arrival_times_within) and deriving both
+    horizons as cheap post-filters (arrivals_within_horizon) -- this
+    asserts the call count directly so the duplication can't silently
+    creep back in."""
+    calls = []
+    original = optimiser_module.arrival_times_within
+
+    def counting_wrapper(*args, **kwargs):
+        calls.append(1)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(optimiser_module, "arrival_times_within", counting_wrapper)
+    wx = SyntheticWeatherField("calm")
+    optimise(
+        PlanRequest(
+            weather=wx, geography=geo, vessel=vessel, pace=50, comfort=50, latest_arrival_h=5.0
+        )
+    )
+    assert len(calls) == 1
 
 
 def test_impossible_eta_window_flags_and_orders_fastest_first(vessel, geo):
