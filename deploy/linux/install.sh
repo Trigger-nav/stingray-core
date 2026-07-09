@@ -18,6 +18,25 @@ mkdir -p "${INSTALL_DIR}/data"
 cp "${SCRIPT_DIR}/../../dist/stingray" "${INSTALL_DIR}/stingray"
 chmod +x "${INSTALL_DIR}/stingray"
 
+# `api/config.py`'s default data paths (vessel spec, geography, seed
+# weather npz) are plain relative paths, resolved against the process's
+# *working directory* (systemd's WorkingDirectory=/opt/stingray) -- not
+# against deploy/pyinstaller.spec's bundled `datas=` copy, which
+# PyInstaller's onefile mode extracts to a throwaway temp dir
+# (sys._MEIPASS) at every run, never consulted by a plain open(path) call.
+# Found empirically during Hetzner deploy-readiness review: the macOS
+# trial build (deploy/README.md's "Verified this session" note) ran
+# `dist/stingray` from inside the repo checkout, where `data/` already
+# existed in the cwd by coincidence -- masking that install.sh itself
+# never actually populates it. Without this copy, stingray-planner
+# crash-loops on first start with a FileNotFoundError the moment
+# AppState tries to load the vessel spec. Trailing `/.` copies *contents*
+# into the already-created DEST dir (idempotent on re-runs) rather than
+# nesting a second `data/` inside it, which a bare `cp -r SOURCE DEST`
+# would do once DEST already exists.
+cp -r "${SCRIPT_DIR}/../../data/." "${INSTALL_DIR}/data/"
+echo "Copied data/ (vessel spec, geography, seed weather snapshot) to ${INSTALL_DIR}/data"
+
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
   cp "${SCRIPT_DIR}/../.env.example" "${INSTALL_DIR}/.env"
   sed -i "s/^STINGRAY_ROLE=.*/STINGRAY_ROLE=${ROLE}/" "${INSTALL_DIR}/.env"
