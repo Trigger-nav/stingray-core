@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 JobStatus = Literal["queued", "running", "done", "failed"]
 
 
+class QueueFullError(Exception):
+    """Raised by `JobStore.submit()` when `Settings.max_queue_depth`
+    queued+running jobs are already in flight (ticket B2 amendment) --
+    caught by `api/errors.py`'s handler and turned into a `429`, matching
+    the existing `ValueError`->`422` pattern (design 10)."""
+
+
 @dataclass
 class JobError:
     code: Literal["invalid_request", "internal_error"]
@@ -94,10 +101,26 @@ class JobStore:
                 logger.exception("job store eviction sweep failed, will retry")
 
     def submit(self, payload: PlanJobPayload) -> JobRecord:
-        job_id = uuid.uuid4().hex
-        future = self._executor_holder.executor.submit(run_plan_job, payload)
-        record = JobRecord(job_id=job_id, submitted_at=time.time(), future=future)
+        """Raises `QueueFullError` (mapped to HTTP 429, api/errors.py) if
+        `Settings.max_queue_depth` queued+running jobs are already in
+        flight -- checked *before* touching the executor, so a rejected
+        submission never occupies a worker slot."""
         with self._lock:
+            # Refresh every still-open record first -- JobRecord.status
+            # only reflects a completed future once _refresh() has run
+            # (it sets `finished_at`), so an unrefreshed-but-actually-done
+            # job would otherwise still read as "queued" here and
+            # overcount the real in-flight depth.
+            for record in self._records.values():
+                self._refresh(record)
+            in_flight = sum(1 for r in self._records.values() if r.status in ("queued", "running"))
+            if in_flight >= self._config.max_queue_depth:
+                raise QueueFullError(
+                    f"queue is full ({in_flight}/{self._config.max_queue_depth} jobs in flight)"
+                )
+            job_id = uuid.uuid4().hex
+            future = self._executor_holder.executor.submit(run_plan_job, payload)
+            record = JobRecord(job_id=job_id, submitted_at=time.time(), future=future)
             self._records[job_id] = record
         return record
 

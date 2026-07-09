@@ -14,6 +14,8 @@ import logging
 from fastapi import Request
 from fastapi.responses import JSONResponse
 
+from api.jobs import QueueFullError
+
 logger = logging.getLogger(__name__)
 
 
@@ -21,6 +23,18 @@ async def value_error_handler(request: Request, exc: ValueError) -> JSONResponse
     return JSONResponse(
         status_code=422,
         content={"code": "invalid_request", "message": str(exc)},
+    )
+
+
+async def queue_full_handler(request: Request, exc: QueueFullError) -> JSONResponse:
+    """Ticket B2 amendment -- `JobStore.submit()`'s queue-depth cap.
+    `Retry-After` is a rough, fixed hint (not derived from actual job
+    durations, which vary 1.5-60s per CLAUDE.md's B1 gotcha) -- good
+    enough for a client backoff, not a precise estimate."""
+    return JSONResponse(
+        status_code=429,
+        content={"code": "queue_full", "message": str(exc)},
+        headers={"Retry-After": "5"},
     )
 
 

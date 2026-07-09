@@ -16,11 +16,12 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from api.auth import make_auth_dependency
 from api.config import Settings
-from api.errors import unhandled_exception_handler, value_error_handler
-from api.jobs import JobStore
+from api.errors import queue_full_handler, unhandled_exception_handler, value_error_handler
+from api.jobs import JobStore, QueueFullError
 from api.routes import router
 from api.state import AppState
 from api.weather_sync import WeatherSyncLoop
@@ -63,7 +64,26 @@ def create_app(config: Settings | None = None) -> FastAPI:
             app_state.shutdown()
 
     app = FastAPI(title="Stingray Planner", lifespan=lifespan)
+    # Ticket B2: the demo UI is a browser client on a different origin.
+    # CORSMiddleware intercepts/answers OPTIONS preflight requests itself,
+    # before they'd ever reach the router's auth dependency below --
+    # preflights never carry credentials, so this is required regardless
+    # of auth. allow_credentials=False deliberately: Basic Auth travels in
+    # the Authorization header, not a cookie, so CORS "credentials mode"
+    # (which governs cookie semantics) isn't the relevant mechanism here --
+    # leaving it False keeps allow_origins free to be an explicit list
+    # without the credentials=True + origins=["*"] incompatibility ever
+    # coming up. allow_headers names Authorization explicitly since it
+    # sits outside the CORS "simple request" header set.
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(config.cors_origins),
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "Content-Type"],
+        allow_credentials=False,
+    )
     app.add_exception_handler(ValueError, value_error_handler)
+    app.add_exception_handler(QueueFullError, queue_full_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
     app.include_router(router, dependencies=[Depends(make_auth_dependency(config))])
     return app

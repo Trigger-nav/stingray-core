@@ -18,7 +18,7 @@ from concurrent.futures import Future
 import pytest
 
 from api.config import Settings
-from api.jobs import JobError, JobRecord, JobStore
+from api.jobs import JobError, JobRecord, JobStore, QueueFullError
 from api.state import AppState, PlanJobPayload
 from core.units import LatLon
 
@@ -196,3 +196,46 @@ def test_sweep_max_size_backstop_never_evicts_queued_or_running(app_state):
     store.sweep()
     assert store.get("running") is not None
     assert store.get("running").status in ("queued", "running")
+
+
+def test_submit_raises_queue_full_at_the_configured_depth(app_state):
+    # ticket B2 amendment: caps queued+running jobs, not the total stored
+    # record count (job_max_size already bounds that separately).
+    store = _bare_job_store(app_state)
+    store._config = dataclasses.replace(app_state.config, max_queue_depth=2)
+    now = time.time()
+    with store._lock:
+        store._records["a"] = JobRecord(job_id="a", submitted_at=now, future=Future())
+        store._records["b"] = JobRecord(job_id="b", submitted_at=now, future=Future())
+    with pytest.raises(QueueFullError):
+        store.submit(_short_payload())
+
+
+def test_submit_does_not_count_done_or_failed_jobs_toward_the_cap(app_state):
+    store = _bare_job_store(app_state)
+    store._config = dataclasses.replace(app_state.config, max_queue_depth=1)
+    now = time.time()
+    with store._lock:
+        store._records["done"] = _make_finished_record("done", finished_at=now)
+        store._records["failed"] = _make_finished_record("failed", finished_at=now, failed=True)
+    # neither "done" nor "failed" counts as in-flight -- submission
+    # succeeds despite two records already present.
+    record = store.submit(_short_payload())
+    assert record.job_id
+
+
+def test_submit_refreshes_before_counting_so_a_completed_unpolled_job_does_not_overcount(app_state):
+    # a future that has already resolved, but whose record has never been
+    # polled (finished_at still None) -- JobRecord.status alone would
+    # misread this as "queued" without submit()'s pre-count refresh.
+    store = _bare_job_store(app_state)
+    store._config = dataclasses.replace(app_state.config, max_queue_depth=1)
+    resolved_future: Future = Future()
+    resolved_future.set_result(None)
+    with store._lock:
+        store._records["stale"] = JobRecord(
+            job_id="stale", submitted_at=time.time(), future=resolved_future
+        )
+    # would raise QueueFullError if "stale" were miscounted as in-flight.
+    record = store.submit(_short_payload())
+    assert record.job_id

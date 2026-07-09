@@ -226,3 +226,28 @@ class TelemetryStatusOut(BaseModel):
     sensor_tier: str | None
     sample_count: int
     gap_seconds: float | None
+
+
+class WeatherFieldOut(BaseModel):
+    """Ticket B2 amendment: a downsampled weather-grid snapshot at one
+    valid-time, for the demo UI's chart heatmap/wind layer (`drawWx()`,
+    the third `SCENARIOS`-call-site the original B2 plan missed).
+    Deliberately not a mirror of `core.weather.GriddedWeatherField`'s
+    full-resolution grid -- this is a display-only downsample built by
+    repeatedly calling the same `.sample()` interpolation every other
+    consumer uses, not a new `core/` code path. `hs_m`/`wind_from_deg` are
+    `null` (never a Python `NaN`, which isn't valid JSON) over land/masked
+    cells, matching `core/weather.py`'s own "missing propagates as
+    missing" convention -- the client should skip drawing a null cell,
+    not treat it as calm."""
+
+    lat0_deg: float
+    dlat_deg: float
+    lon0_deg: float
+    dlon_deg: float
+    nlat: int
+    nlon: int
+    valid_time_h: float  # quantized to the nearest hour -- see api/weather_field.py
+    hs_m: list[list[float | None]]  # [lat_idx][lon_idx]
+    wind_speed_kn: list[list[float | None]]
+    wind_from_deg: list[list[float | None]]

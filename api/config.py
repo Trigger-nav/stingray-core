@@ -31,6 +31,13 @@ def _env_int(name: str, default: int) -> int:
     return int(raw) if raw is not None else default
 
 
+def _env_origins(name: str, default: tuple[str, ...]) -> tuple[str, ...]:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return tuple(origin.strip() for origin in raw.split(",") if origin.strip())
+
+
 @dataclass(frozen=True)
 class Settings:
     role: Role = "vessel"
@@ -67,6 +74,21 @@ class Settings:
     job_ttl_s: float = 86_400.0  # 24h past finished_at
     job_max_size: int = 5_000
     job_eviction_interval_s: float = 300.0  # 5 min sweep cadence
+    # Ticket B2 amendment: caps queued+running jobs (not the total stored
+    # record count -- job_max_size above already bounds that) so a client
+    # bug/retry loop or a burst of demo traffic can't unboundedly queue
+    # work behind the ProcessPoolExecutor; JobStore.submit() raises
+    # QueueFullError once this many jobs are queued or running, mapped to
+    # HTTP 429 (api/errors.py). 20 is a generous multiple of a typical
+    # pool_size (os.cpu_count()) -- deep enough that a legitimate burst of
+    # a few users isn't rejected, shallow enough that a runaway client
+    # can't build an hours-long backlog before anyone notices.
+    max_queue_depth: int = 20
+
+    # ticket B2: browser-origin allow-list for the demo UI (api/main.py's
+    # CORSMiddleware). A tuple, not a list, so the frozen dataclass's
+    # default doesn't need default_factory.
+    cors_origins: tuple[str, ...] = ("http://localhost:8080",)
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -100,4 +122,6 @@ class Settings:
             job_ttl_s=_env_float("STINGRAY_JOB_TTL_S", 86_400.0),
             job_max_size=_env_int("STINGRAY_JOB_MAX_SIZE", 5_000),
             job_eviction_interval_s=_env_float("STINGRAY_JOB_EVICTION_INTERVAL_S", 300.0),
+            max_queue_depth=_env_int("STINGRAY_MAX_QUEUE_DEPTH", 20),
+            cors_origins=_env_origins("STINGRAY_CORS_ORIGINS", ("http://localhost:8080",)),
         )

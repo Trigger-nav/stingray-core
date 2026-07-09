@@ -9,7 +9,7 @@ import os
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 from api.convert import (
     latlon_from_model,
@@ -30,6 +30,7 @@ from api.schemas import (
     VesselSpecModel,
 )
 from api.state import AppState, PlanJobPayload
+from api.weather_field import build_weather_field, compute_weather_field_etag, quantize_hour
 
 router = APIRouter(prefix="/v1")
 
@@ -134,6 +135,23 @@ def get_latest_weather(app_state: AppStateDep) -> FileResponse:
     if not os.path.exists(path):
         raise HTTPException(status_code=404, detail="no weather file available yet")
     return FileResponse(path, media_type="application/octet-stream", filename="latest.npz")
+
+
+@router.get("/weather/field")
+def get_weather_field(request: Request, app_state: AppStateDep, h: float = 0.0) -> Response:
+    """Ticket B2 amendment: a downsampled weather-grid snapshot at one
+    valid-time, for the demo UI's chart heatmap/wind layer (`drawWx()`)
+    and forecast scrub. `h` is quantized to the nearest hour (source
+    weather data's own real resolution, per `api/weather_field.py`) both
+    for the served content and the `ETag`, so a continuous scrub gesture
+    collapses onto a small number of distinct, cacheable responses rather
+    than recomputing/re-transferring a fresh grid on every tick."""
+    valid_time_h = quantize_hour(h)
+    etag = compute_weather_field_etag(app_state.weather, valid_time_h)
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304)
+    field = build_weather_field(app_state.weather, valid_time_h)
+    return JSONResponse(content=field.model_dump(), headers={"ETag": etag})
 
 
 @router.get("/telemetry/status", response_model=TelemetryStatusOut)

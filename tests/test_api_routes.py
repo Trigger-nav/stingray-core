@@ -123,3 +123,39 @@ def test_cloud_role_serves_weather_npz(cloud_client):
 def test_vessel_role_does_not_serve_weather_npz(client):
     r = client.get("/v1/weather/latest.npz", auth=AUTH)
     assert r.status_code == 404
+
+
+def test_submit_plan_returns_429_when_queue_is_full():
+    app = create_app(_settings(max_queue_depth=1))
+    with TestClient(app) as client:
+        first = _submit_short_route(client)
+        assert first.status_code == 202
+        second = _submit_short_route(client)
+        assert second.status_code == 429
+        assert second.json()["code"] == "queue_full"
+        assert second.headers.get("retry-after")
+
+
+def test_weather_field_returns_a_downsampled_grid(client):
+    r = client.get("/v1/weather/field?h=3", auth=AUTH)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["valid_time_h"] == 3.0
+    assert len(body["hs_m"]) == body["nlat"]
+    assert len(body["hs_m"][0]) == body["nlon"]
+    assert "etag" in {k.lower() for k in r.headers}
+
+
+def test_weather_field_conditional_get_returns_304(client):
+    first = client.get("/v1/weather/field?h=3", auth=AUTH)
+    etag = first.headers["etag"]
+    second = client.get("/v1/weather/field?h=3", headers={"If-None-Match": etag}, auth=AUTH)
+    assert second.status_code == 304
+    assert second.content == b""
+
+
+def test_weather_field_quantizes_h_to_the_nearest_hour(client):
+    a = client.get("/v1/weather/field?h=3.0", auth=AUTH)
+    b = client.get("/v1/weather/field?h=3.4", auth=AUTH)
+    assert a.json()["valid_time_h"] == b.json()["valid_time_h"] == 3.0
+    assert a.headers["etag"] == b.headers["etag"]
