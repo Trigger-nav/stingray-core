@@ -48,6 +48,37 @@ different injection mechanisms).
 `STINGRAY_ROLE=cloud` or `STINGRAY_ROLE=vessel` is the one setting that
 matters most (api/config.py) — see CLAUDE.md's gotcha for what it changes.
 
+## Local dev server (no packaging)
+
+For local work against a real API instance -- e.g. ticket B2's manual
+demo-UI verification -- skip the PyInstaller build entirely:
+
+```
+pip install -e ".[api]"
+STINGRAY_API_USER=... STINGRAY_API_PASSWORD=... STINGRAY_CORS_ORIGINS=http://localhost:8080 \
+  python3 -m api.main
+```
+
+(or `uvicorn api.main:app --port 8000` directly, equivalent). Serve
+`prototype/` on a *different* local port (`python3 -m http.server 8080`
+from that directory) so the demo UI actually exercises CORS rather than
+being accidentally same-origin.
+
+**Orphaned dev servers, found for real during B2's verification:** both
+of the above are long-running foreground processes with no packaged
+service wrapper around them (that's the whole point of this section) --
+background them (`&`/`nohup`) for a multi-step manual test and it's easy
+to lose track and leave several accumulating across a session, each still
+holding its port. Symptom: a fresh `python3 -m api.main` mysteriously
+fails to bind, or requests silently hit a *stale* process serving old
+code. Find and clear them before assuming a bug:
+
+```
+lsof -iTCP:8000 -sTCP:LISTEN   # planner API
+lsof -iTCP:8080 -sTCP:LISTEN   # demo UI static server
+kill <pid>                     # from lsof's PID column, once confirmed stale
+```
+
 ## Installing
 
 ### Linux (cloud VM)

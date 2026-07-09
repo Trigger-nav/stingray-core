@@ -89,7 +89,26 @@ def create_app(config: Settings | None = None) -> FastAPI:
     return app
 
 
-# `uvicorn api.main:app` (module-level default, uses env-derived Settings)
-# vs. `uvicorn api.main:create_app --factory` (tests/deploy scripts that
-# need to inject a specific Settings instance) -- both work.
+# `uvicorn api.main:app` (module-level default) vs. `uvicorn
+# api.main:create_app --factory` -- both resolve to the same
+# Settings.from_env(); the CLI factory flag does not let uvicorn inject a
+# custom Settings instance (that's Python-only, e.g. tests calling
+# create_app(config) directly) -- it only changes whether uvicorn imports
+# this already-built module-level `app` or calls create_app() itself a
+# second, redundant time. Prefer plain `api.main:app` unless a tool
+# specifically requires factory semantics.
 app = create_app()
+
+
+if __name__ == "__main__":
+    # `python3 -m api.main` -- the normal, non-packaged dev invocation
+    # deploy/stingray_cli.py's own docstring promises stays working
+    # unchanged (it deliberately isn't imported by this module so that
+    # promise holds even when deploy/ isn't installed). Mirrors that
+    # script's _run_planner(): the app object, not the "api.main:app"
+    # string form (see that function's docstring for why), host/port from
+    # the same Settings.from_env() app already used.
+    import uvicorn
+
+    _dev_config = Settings.from_env()
+    uvicorn.run(app, host=_dev_config.host, port=_dev_config.port)
