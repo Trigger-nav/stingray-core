@@ -16,6 +16,13 @@ One visit, ~2 hours, with the ETO or chief engineer. Goal: everything ordered an
 - [ ] Monitoring/alarm system: vendor (Böning / Praxis / other), model, data-export capability (Modbus TCP? OPC UA?)
 - [ ] Confirm on the bus (record PGNs seen): position/SOG/COG, heading, STW, wind, **engine fuel rate (PGN 127489)**, tank levels (127505), attitude (127257)
 
+## Bridge PC (MVP deployment target)
+- [ ] Make/OS/version, spare USB port, admin rights available (who holds them?)
+- [ ] Power/sleep policy — can it be set to never sleep while under way?
+- [ ] Antivirus/IT policy that could block an installed service
+- [ ] Gateway route — preferred: Ethernet drop near an N2K backbone spur for YDEN-02 (bus-powered; confirm switch port + any VLAN segregation between nav LAN and crew LAN)
+- [ ] Fallback: USB routing from PC to a backbone drop for Actisense NGT-1/NGX-1 (cable run, driver policy)
+
 ## Connectivity & power
 - [ ] Ship LAN access point near install location; Starlink/VSAT bandwidth policy; guest vs crew network segregation
 - [ ] 12/24V DC supply at install location, breaker availability

@@ -16,6 +16,9 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.6",
+    # FastAPI's TestClient (tests/test_api_routes.py etc., ticket B1)
+    # requires httpx even though api/ itself never imports it directly.
+    "httpx>=0.28",
 ]
 # Ingest-only: one-time data preprocessing (GSHHG shapefile parsing/clipping,
 # GEBCO remote netCDF subsetting, GRIB2 weather parsing). core/ stays at
@@ -47,9 +50,35 @@ ingest = [
 fit = [
     "scipy>=1.11",
 ]
+# api/-only: the planner service (ticket B1) -- job-shaped FastAPI wrapper
+# over core.optimiser.optimise. Deliberately excludes ingest's cfgrib/
+# eccodes: api/ must build cleanly on Windows/macOS via PyInstaller for the
+# bridge-PC target (docs/plans/ticket-B1.md design 6/11), and eccodes is a
+# system C library, not pip-installable, notoriously fragile to bundle
+# cross-platform -- so heavy GRIB ingest stays cloud-role-only, invoked as
+# a separate `ingest` extras install on the cloud VM, never imported here.
+api = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "pydantic>=2.7",
+    # Already an installed transitive dependency of uvicorn[standard];
+    # declared directly since deploy/stingray_cli.py relies on it
+    # directly too (loading a .env file uniformly across all three
+    # service-wrapper mechanisms -- systemd/launchd/NSSM -- design 11).
+    "python-dotenv>=1.0",
+]
+# capture/-only: the logging service (ticket B1/B5) -- NMEA 2000 gateway
+# abstraction + PGN decode + local telemetry store. Version floors
+# confirmed live against PyPI during planning (real current versions
+# 2026.5.2/3.5, not guessed -- see docs/plans/ticket-B1.md's
+# "Implementation order").
+capture = [
+    "nmea2000>=2026.5",
+    "pyserial>=3.5",
+]
 
 [tool.hatch.build.targets.wheel]
-packages = ["core", "ingest", "fit"]
+packages = ["core", "ingest", "fit", "api", "capture"]
 
 [tool.ruff]
 line-length = 100

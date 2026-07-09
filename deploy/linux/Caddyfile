@@ -1,0 +1,16 @@
+# Cloud-role TLS reverse proxy (ticket B1 design 9) -- HTTP Basic Auth
+# over plain HTTP would leak the password in transit, in tension with
+# docs/pilot/data-agreement-outline.md's "encryption in transit"
+# commitment. Caddy gets automatic Let's Encrypt TLS from ~5 lines of
+# config -- still "cheap single VM," not IaC-scale ceremony.
+#
+# Vessel-role instances do NOT need this (deploy/README.md) -- they bind
+# to the ship LAN/localhost only, never the public internet, matching
+# TECHNICAL_ARCHITECTURE.md §8's "no internet exposure of the edge
+# device" principle.
+#
+# Replace with your real domain, then: caddy run --config Caddyfile
+
+your-cloud-instance.example.com {
+    reverse_proxy 127.0.0.1:8000
+}

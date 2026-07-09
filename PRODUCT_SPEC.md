@@ -126,7 +126,7 @@ Connectivity assumption: intermittent, expensive satcom (though Starlink is now 
 
 ## 11. Key decisions (resolved July 2026)
 
-1. **Hardware — hybrid.** Own-brand edge device for yachts without modern monitoring; integrate with installed monitoring systems (e.g. Böning, Praxis) where present. Protects the one-day-install claim while maximising fleet coverage.
+1. **Hardware — hybrid.** Own-brand edge device for yachts without modern monitoring; integrate with installed monitoring systems (e.g. Böning, Praxis) where present. Protects the one-day-install claim while maximising fleet coverage. **MVP amendment (July 2026):** initial deployment target is the **bridge PC** — planner + logging services installed locally with a USB NMEA 2000 gateway as the only hardware; the dedicated edge device (adds IMU/motion ground truth, isolation, always-on logging) becomes the full-tier product in Phase 2.
 2. **Pricing — per-vessel SaaS with fleet tiers.** Priced as a fraction of demonstrated annual fuel saving; fleet discounts align with the management-company sales motion.
 3. **Sensor floor — NMEA + manual daily fuel entries.** Nearly every 30m+ yacht qualifies on day one; flowmeter integration accelerates twin confidence but is not required.
 4. **Flag/class — validate before first sale.** Brief REG and Cayman early; obtain written comfort that an advisory-only device requires no type approval.

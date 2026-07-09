@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Ticket B1 design 11: LaunchDaemon (not LaunchAgent) -- installed to
+  /Library/LaunchDaemons so it runs at boot regardless of whether a user
+  is logged in, matching B5's "always-on logging" requirement (the same
+  reasoning applies to the planner service: a bridge PC left unattended
+  at the helm should still serve the UI).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stingray.planner</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/stingray/stingray</string>
+        <string>planner</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/stingray</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <!-- Real values come from /usr/local/stingray/.env, sourced by
+             build_pkg.sh's postinstall script into launchctl's own
+             environment at install time -- edit .env, then
+             `launchctl unload/load` this plist to pick up changes. -->
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/usr/local/stingray/planner.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/stingray/planner.error.log</string>
+</dict>
+</plist>

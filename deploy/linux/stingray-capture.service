@@ -1,0 +1,19 @@
+[Unit]
+Description=Stingray logging service (NMEA 2000 capture)
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=/opt/stingray/.env
+# Edit --gateway/--host/--device to match the vessel's actual gateway
+# during commissioning (B5: YDEN-02 Ethernet preferred, Actisense serial
+# as the alternative) -- see deploy/README.md. Inert/unused on a
+# cloud-role instance (no NMEA bus attached there); only enable this unit
+# on a vessel-role install with a gateway actually connected.
+ExecStart=/opt/stingray/stingray capture --gateway yacht-devices --host 127.0.0.1
+WorkingDirectory=/opt/stingray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

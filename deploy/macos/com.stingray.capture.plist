@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Edit ProgramArguments' --gateway/--host/--device flags to match this
+     vessel's actual gateway during commissioning (B5: YDEN-02 Ethernet
+     preferred, Actisense serial as the alternative). -->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stingray.capture</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/stingray/stingray</string>
+        <string>capture</string>
+        <string>--gateway</string>
+        <string>yacht-devices</string>
+        <string>--host</string>
+        <string>127.0.0.1</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>/usr/local/stingray</string>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/usr/local/stingray/capture.log</string>
+    <key>StandardErrorPath</key>
+    <string>/usr/local/stingray/capture.error.log</string>
+</dict>
+</plist>

@@ -1,0 +1,17 @@
+# Cloud-role scheduled GRIB fetch (ticket B1 design 6) -- append to
+# `crontab -e` on the cloud VM (STINGRAY_ROLE=cloud only; the vessel role
+# never runs these, see api/weather_sync.py instead). Cadences match the
+# real, confirmed-live cadences from ticket 0.5: NOMADS hourly-ish, ECMWF
+# 3-hourly.
+#
+# Requires the `ingest` extras (cfgrib/eccodes) installed separately from
+# the PyInstaller-built `stingray` binary -- ingest/ is a normal Python
+# package invocation (`python3 -m ingest.fetch_grib_*`), not bundled into
+# the frozen binary (deploy/pyinstaller.spec explicitly excludes cfgrib/
+# xarray/h5netcdf/h5py -- see that file's `excludes` list and comment).
+#
+# 0 * * * *    fetch every hour on the hour
+# 5 */3 * * *  fetch every 3 hours, 5 minutes past
+
+0 * * * *   cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_nomads --out /opt/stingray/data/weather/nomads_western_med.npz >> /var/log/stingray-fetch-nomads.log 2>&1
+5 */3 * * * cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_ecmwf --out /opt/stingray/data/weather/ecmwf_western_med.npz >> /var/log/stingray-fetch-ecmwf.log 2>&1

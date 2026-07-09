@@ -1,0 +1,48 @@
+# Copy to .github/workflows/build-installers.yml to activate -- kept
+# under deploy/ rather than .github/workflows/ directly, matching this
+# repo's existing precedent (prototype/deploy/github-pages.yml is the
+# same shape: a deploy-specific workflow template, not auto-active until
+# copied into place). Manual/tag-triggered, not run on every push --
+# these are release artefacts, not something CI needs to rebuild per
+# commit.
+#
+# 3-OS matrix because PyInstaller cannot cross-compile (bundles a native
+# interpreter per platform) -- ticket B1 design 11. Each OS produces the
+# *same* `stingray` binary from the *same* `deploy/pyinstaller.spec` --
+# only the OS-native service-registration wrapper differs downstream
+# (Inno Setup / pkgbuild / systemd install.sh), matching contract point
+# 2's "same artefact, moving it is a deployment change."
+
+name: Build installers
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact-name: stingray-linux
+          - os: windows-latest
+            artifact-name: stingray-windows
+          - os: macos-latest
+            artifact-name: stingray-macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: pip install -e ".[api,capture]" pyinstaller
+      - name: Build
+        run: pyinstaller deploy/pyinstaller.spec --distpath dist --workpath build --noconfirm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: dist/stingray*

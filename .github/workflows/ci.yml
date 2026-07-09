@@ -13,7 +13,13 @@ jobs:
         with:
           python-version: "3.11"
       - name: Install
-        run: pip install -e ".[dev]"
+        # api/capture extras only -- both are pure-Python/pip-installable
+        # (no system eccodes needed, see pyproject.toml's api/capture
+        # comments), so no apt-get step required for these new tests. The
+        # `ingest` extras (cfgrib/eccodes) aren't installed here since
+        # ticket 0.5 already covers that gap separately and B1's api/
+        # tests don't exercise real GRIB ingest.
+        run: pip install -e ".[dev,api,capture]"
       - name: Lint
         run: ruff check .
       - name: Test (full suite, incl. slow)
