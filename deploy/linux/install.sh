@@ -14,9 +14,35 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "Installing Stingray (role=${ROLE}) to ${INSTALL_DIR}"
 
+# Captured before touching anything below -- `systemctl enable --now` at
+# the end of this script is a no-op on an already-active unit (it doesn't
+# restart it), so an *upgrade* of an already-running install needs an
+# explicit restart to actually pick up the new binary. Checked this early
+# since the unit may not exist yet on a first-ever install (is-active on
+# an unknown unit just reports inactive, which is correct here too).
+WAS_ACTIVE=false
+if systemctl is-active --quiet stingray-planner 2>/dev/null; then
+  WAS_ACTIVE=true
+fi
+
 mkdir -p "${INSTALL_DIR}/data"
-cp "${SCRIPT_DIR}/../../dist/stingray" "${INSTALL_DIR}/stingray"
-chmod +x "${INSTALL_DIR}/stingray"
+# Not a plain `cp` onto ${INSTALL_DIR}/stingray -- found live during a
+# real Hetzner binary upgrade (2026-07-13, finding #4): overwriting a
+# *running* executable in place fails with "Text file busy" (ETXTBSY) on
+# Linux, and under this script's `set -euo pipefail` that aborts the
+# whole run right here, leaving the *old* binary still serving --
+# deceptively healthy, since the next health check passes against stale
+# code. `mv`/`rename(2)` succeeds on a busy file (it only repoints the
+# directory entry, not the running process's already-open file
+# descriptor) -- the same atomic-replace pattern
+# `ingest/grib_common.py`'s `write_npz_atomic` uses for weather npz
+# writes. `mktemp` in the same directory as the final path keeps the `mv`
+# on one filesystem (a cross-filesystem `mv` falls back to copy+delete,
+# which reintroduces the exact busy-file problem this is avoiding).
+TMP_BIN="$(mktemp "${INSTALL_DIR}/.stingray.XXXXXX")"
+cp "${SCRIPT_DIR}/../../dist/stingray" "${TMP_BIN}"
+chmod 0755 "${TMP_BIN}"
+mv "${TMP_BIN}" "${INSTALL_DIR}/stingray"
 
 # `api/config.py`'s default data paths (vessel spec, geography, seed
 # weather npz) are plain relative paths, resolved against the process's
@@ -58,6 +84,17 @@ fi
 cp "${SCRIPT_DIR}/stingray-planner.service" /etc/systemd/system/
 systemctl daemon-reload
 systemctl enable --now stingray-planner
+
+# `enable --now` above is a no-op on a unit that's already active -- it
+# does not restart it, so a re-run of this script against an already-
+# running install (an upgrade) would otherwise leave the old process
+# serving even though ${INSTALL_DIR}/stingray now points at the new
+# binary (see the WAS_ACTIVE comment near the top). Restart explicitly so
+# an upgrade actually takes effect without a separate manual step.
+if [ "${WAS_ACTIVE}" = true ]; then
+  echo "stingray-planner was already running -- restarting to pick up the new binary"
+  systemctl restart stingray-planner
+fi
 
 if [ "${ROLE}" = "vessel" ]; then
   cp "${SCRIPT_DIR}/stingray-capture.service" /etc/systemd/system/

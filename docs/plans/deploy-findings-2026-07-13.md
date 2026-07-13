@@ -8,7 +8,8 @@ fix; Ubuntu 24.04 `libeccodes-dev` apt route (cfgrib imports and fetches
 cleanly — the ticket-0.5 gap is closed); real Let's Encrypt issuance via the
 runbook's Caddy path; full end-to-end plan over public TLS.
 
-Three defects found live, in priority order — fix before relying on cron:
+Four defects found live across the initial deploy and a follow-up binary
+upgrade, in priority order — fix before relying on cron:
 
 1. **Runbook ordering bug (fresh-box crash-loop).** `data/weather/*.npz` is
    gitignored, so a fresh clone has no weather file; `install.sh` copies
@@ -35,6 +36,26 @@ Three defects found live, in priority order — fix before relying on cron:
    served payload flagging it. (Provenance already exposes the cycle, so the
    /v1/health freshness is *visible*, but the fetcher should self-heal.)
    Add a regression test with a mocked 404-then-success sequence.
+
+4. **`install.sh` can't upgrade a running binary in place — found during a
+   follow-up binary upgrade on the same box, not the initial deploy.** A
+   plain `cp` onto the currently-running `/opt/stingray/stingray` fails
+   with "Text file busy" (Linux refuses to truncate-and-rewrite an
+   executable that's currently mapped/running); because `install.sh` runs
+   `set -euo pipefail`, the script aborts right there, and the *old*
+   binary keeps serving — deceptively healthy, since the operator's next
+   health check passes against stale code. Workaround used live today
+   (stop → install → start) worked; the fix makes it unnecessary. Fix:
+   replace the direct `cp` with copy-to-temp-then-`mv` (`mv`/`rename(2)`
+   succeeds on a busy file — it only repoints the directory entry, not the
+   running process's already-open file descriptor — the same
+   atomic-replace pattern `ingest/grib_common.py`'s `write_npz_atomic`
+   already uses for weather npz writes), and additionally restart
+   `stingray-planner` at the end of `install.sh` if it was already active
+   before the run, so an upgrade actually takes effect without a separate
+   manual step. Add a short "Upgrading" subsection to `deploy/README.md`'s
+   Cloud VM runbook: `git pull` → rebuild → `install.sh` → verify with
+   `stat` on the binary timestamp + a health `curl`.
 
 Also update `deploy/README.md`'s "Manual verification checklist" to tick the
 items verified above, and reflect fix #1's reordering in the runbook itself.

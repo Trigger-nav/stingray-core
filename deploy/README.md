@@ -393,6 +393,35 @@ TLS, auth, the planner service, real geography+weather — is working. Then
 open the hosted demo in a real browser and confirm a plan actually
 renders (the one verification step this runbook can't script for you).
 
+### Upgrading
+
+Once a box is already running (steps 1–11 done once), a code update is
+the same checkout, rebuilt and reinstalled in place — no manual
+stop/start dance needed (found live during a follow-up binary upgrade,
+2026-07-13, finding #4: `install.sh` used to `cp` straight onto the
+running binary, which fails with "Text file busy" and, under the
+script's `set -euo pipefail`, aborted mid-run with the *old* binary still
+serving — deceptively healthy, since the next health check passes on
+stale code. Fixed via copy-to-temp-then-`mv`, same atomic-replace pattern
+as `ingest/grib_common.py`'s `write_npz_atomic`; `install.sh` now also
+restarts `stingray-planner` itself at the end if it was already running):
+
+```
+cd stingray && git pull
+source .venv/bin/activate
+pyinstaller deploy/pyinstaller.spec --distpath dist --workpath build
+sudo STINGRAY_ROLE=cloud ./deploy/linux/install.sh
+```
+
+Verify the upgrade actually took — a stale binary `mtime` after a
+supposedly successful `install.sh` run means the copy failed silently
+somewhere upstream (re-check the `pyinstaller` output above it):
+
+```
+stat -c '%y' /opt/stingray/stingray   # should be ~now
+curl -u <user>:<password> http://127.0.0.1:8000/v1/health
+```
+
 ## Manual verification checklist (pending, needs real hardware/deployment)
 
 - [x] Real trial build on macOS/arm64 — planner + capture subcommands
