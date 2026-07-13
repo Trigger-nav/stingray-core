@@ -28,4 +28,6 @@ Position and operational data are owner-sensitive. Per-vessel isolation; raw dat
 
 1–2 displacement/semi-displacement motoryachts, 40–70 m, Mediterranean-based this season, with an engaged captain and chief engineer. Modern electronic engines (fuel-rate on the bus) preferred; flowmeters a bonus, not a requirement.
 
+**See it live:** our planning demo runs on real forecasts and real geography — https://trigger-nav.github.io/stingray-demo/stingray_planner.html (synthetic vessel, advisory only, not for navigation).
+
 **Contact:** Jack Trigger · jacktrigger@hotmail.com
