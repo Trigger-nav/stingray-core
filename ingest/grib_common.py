@@ -19,15 +19,22 @@ disagrees.
 
 from __future__ import annotations
 
+import logging
 import os
+import urllib.error
+from collections.abc import Callable
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 import numpy as np
 import xarray as xr
 
 WW3_DIRECTION_IS_TO_CONVENTION = False
+
+logger = logging.getLogger(__name__)
+
+_T = TypeVar("_T")
 
 
 class _LandChecker(Protocol):
@@ -70,15 +77,92 @@ def mask_land_as_missing(
     return masked
 
 
-def latest_available_cycle_utc(now_utc: datetime, delay_h: float = 5.0) -> tuple[str, str]:
-    """Latest `00/06/12/18z` model cycle that should be fully published by
-    `now_utc`, given a `delay_h` publication-lag safety margin. Takes
-    `now_utc` as a parameter rather than reading the clock internally so
-    it's unit-testable without wall-clock dependence."""
+def latest_available_cycle_utc(
+    now_utc: datetime,
+    *,
+    delay_h: float = 5.0,
+    valid_hours: tuple[int, ...] = (0, 6, 12, 18),
+) -> tuple[str, str]:
+    """Latest model cycle (from `valid_hours`) that should be fully
+    published by `now_utc`, given a `delay_h` publication-lag safety
+    margin. Takes `now_utc` as a parameter rather than reading the clock
+    internally so it's unit-testable without wall-clock dependence.
+
+    `valid_hours` defaults to NOMADS' 6-hourly cadence -- **must** be
+    overridden for sources with a different cycle set (e.g. ECMWF open
+    data's `oper`/`wave` streams only ever publish 00z/12z; the old
+    hard-coded `(available.hour // 6) * 6` could silently pick a 06z/18z
+    that never exists for it -- finding #2, 2026-07-13 Hetzner deploy).
+    """
     available = now_utc - timedelta(hours=delay_h)
-    cycle_hour = (available.hour // 6) * 6
-    cycle_dt = available.replace(hour=cycle_hour, minute=0, second=0, microsecond=0)
-    return cycle_dt.strftime("%Y%m%d"), f"{cycle_hour:02d}"
+    hours = sorted(valid_hours)
+    eligible = [h for h in hours if h <= available.hour]
+    if eligible:
+        cycle_dt = available.replace(hour=eligible[-1], minute=0, second=0, microsecond=0)
+    else:
+        cycle_dt = (available - timedelta(days=1)).replace(
+            hour=hours[-1], minute=0, second=0, microsecond=0
+        )
+    return cycle_dt.strftime("%Y%m%d"), f"{cycle_dt.hour:02d}"
+
+
+def previous_cycle_utc(
+    cycle_date: str, cycle_hour: str, *, valid_hours: tuple[int, ...] = (0, 6, 12, 18)
+) -> tuple[str, str]:
+    """The cycle immediately before `(cycle_date, cycle_hour)` in
+    `valid_hours`'s cadence -- used by `fetch_with_cycle_fallback` to step
+    back one cycle at a time on a 404 (finding #3, 2026-07-13 Hetzner
+    deploy: a 404 on the selected cycle should self-heal, not die)."""
+    dt = datetime.strptime(f"{cycle_date}{cycle_hour}", "%Y%m%d%H")
+    hours = sorted(valid_hours)
+    idx = hours.index(dt.hour)
+    if idx == 0:
+        prev_dt = (dt - timedelta(days=1)).replace(hour=hours[-1])
+    else:
+        prev_dt = dt.replace(hour=hours[idx - 1])
+    return prev_dt.strftime("%Y%m%d"), f"{prev_dt.hour:02d}"
+
+
+def fetch_with_cycle_fallback(
+    cycle_date: str,
+    cycle_hour: str,
+    *,
+    valid_hours: tuple[int, ...],
+    max_attempts: int,
+    attempt: Callable[[str, str], _T],
+) -> tuple[str, str, _T]:
+    """Try `attempt(cycle_date, cycle_hour)`; on an HTTP 404 (cycle not
+    yet published -- the observed live failure mode, ECMWF's `.index`
+    sidecar during the 2026-07-13 Hetzner deploy), step back to the
+    previous valid cycle and retry, up to `max_attempts` cycles total, so
+    a cron job self-heals past a publication-timing race instead of
+    dying with nothing flagging the staleness. Any other exception (a
+    real network/parse failure, not "this cycle doesn't exist yet")
+    propagates immediately -- silently retrying past a genuine error
+    would mask it, not fix it. Every fallback step is logged loudly (old
+    cycle, reason, new cycle) so cron logs make the self-heal visible
+    rather than a job quietly having served older weather. Returns
+    `(date, hour, attempt(date, hour))` for whichever cycle succeeded."""
+    date, hour = cycle_date, cycle_hour
+    for attempt_no in range(max_attempts):
+        try:
+            return date, hour, attempt(date, hour)
+        except urllib.error.HTTPError as exc:
+            if exc.code != 404 or attempt_no == max_attempts - 1:
+                raise
+            new_date, new_hour = previous_cycle_utc(date, hour, valid_hours=valid_hours)
+            logger.warning(
+                "cycle %s %sz not available (HTTP 404, attempt %d/%d) -- "
+                "falling back to previous cycle %s %sz",
+                date,
+                hour,
+                attempt_no + 1,
+                max_attempts,
+                new_date,
+                new_hour,
+            )
+            date, hour = new_date, new_hour
+    raise AssertionError("unreachable")  # loop always returns or re-raises
 
 
 def normalise_and_sort_dataset(ds: xr.Dataset) -> xr.Dataset:

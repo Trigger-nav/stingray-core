@@ -37,6 +37,18 @@ chmod +x "${INSTALL_DIR}/stingray"
 cp -r "${SCRIPT_DIR}/../../data/." "${INSTALL_DIR}/data/"
 echo "Copied data/ (vessel spec, geography, seed weather snapshot) to ${INSTALL_DIR}/data"
 
+# data/weather/*.npz is gitignored -- a checkout that never ran a weather
+# fetch (deploy/README.md's Cloud VM runbook, step 4) copies an empty
+# weather/ dir here, and the service will crash-loop on FileNotFoundError
+# the moment it starts below. Found live during the Hetzner deploy
+# (2026-07-13) -- this warns instead of failing silently into a confusing
+# systemctl status.
+if ! find "${INSTALL_DIR}/data/weather" -name '*.npz' -print -quit 2>/dev/null | grep -q .; then
+  echo "WARNING: no *.npz found in ${INSTALL_DIR}/data/weather -- the" >&2
+  echo "service will crash-loop until a weather fetch runs (see" >&2
+  echo "deploy/README.md's Cloud VM runbook, step 4)." >&2
+fi
+
 if [ ! -f "${INSTALL_DIR}/.env" ]; then
   cp "${SCRIPT_DIR}/../.env.example" "${INSTALL_DIR}/.env"
   sed -i "s/^STINGRAY_ROLE=.*/STINGRAY_ROLE=${ROLE}/" "${INSTALL_DIR}/.env"

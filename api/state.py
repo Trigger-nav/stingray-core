@@ -50,6 +50,23 @@ def _geography_kwargs(config: Settings) -> dict[str, str]:
     return kwargs
 
 
+def _load_weather(path: str) -> WeatherField:
+    """`GriddedWeatherField.from_npz`, with a `FileNotFoundError` turned
+    into an actionable message. Found live during the 2026-07-13 Hetzner
+    deploy: a fresh box with no weather npz yet crash-looped on a bare
+    `FileNotFoundError` traceback in `journalctl` -- this is what makes
+    that failure self-explanatory instead of requiring someone to already
+    know the fix (deploy/README.md's Cloud VM runbook, step 4)."""
+    try:
+        return GriddedWeatherField.from_npz(path)
+    except FileNotFoundError as exc:
+        raise RuntimeError(
+            f"no weather file at {path!r} -- run ingest.fetch_grib_nomads or "
+            "ingest.fetch_grib_ecmwf first (deploy/README.md's Cloud VM "
+            "runbook, step 4)"
+        ) from exc
+
+
 def _worker_init(config: Settings) -> None:
     """`ProcessPoolExecutor(initializer=...)` target -- runs once per
     worker process before it accepts any task.
@@ -79,7 +96,7 @@ def _worker_init(config: Settings) -> None:
     user's first request."""
     global _worker_geography, _worker_weather, _worker_vessel
     _worker_geography = RealGeography(**_geography_kwargs(config))
-    _worker_weather = GriddedWeatherField.from_npz(config.weather_npz_path)
+    _worker_weather = _load_weather(config.weather_npz_path)
     _worker_vessel = VesselSpec.from_yaml(config.vessel_spec_path)
     _validate_weather_sane(_worker_weather, _worker_geography)
 
@@ -210,7 +227,7 @@ class AppState:
         self.config = config
         self.geography: Geography = RealGeography(**_geography_kwargs(config))
         self.vessel: VesselSpec = VesselSpec.from_yaml(config.vessel_spec_path)
-        self.weather: WeatherField = GriddedWeatherField.from_npz(config.weather_npz_path)
+        self.weather: WeatherField = _load_weather(config.weather_npz_path)
         self._pool_size = _resolved_pool_size(config)
         self.executor_holder = ExecutorHolder(_build_executor(config))
         self._last_weather_mtime = self._current_weather_mtime()
@@ -263,7 +280,7 @@ class AppState:
         # expensive) pool swap; an in-progress/partial write from the
         # sync/cron side would fail here and simply retry next tick rather
         # than swapping to a broken pool.
-        new_weather = GriddedWeatherField.from_npz(self.config.weather_npz_path)
+        new_weather = _load_weather(self.config.weather_npz_path)
         old_executor = self.executor_holder.executor
         new_executor = _build_executor(self.config)
         # Wait for the new pool to finish initialising (same mechanism as

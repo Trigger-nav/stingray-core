@@ -102,10 +102,13 @@ in front for TLS (public-internet-facing — required, see design 9).
 
 **For a real deployment, use the full "Cloud VM runbook" section below**
 instead of this quick reference — it covers the base-package/build/DNS/
-firewall steps around `install.sh` this section skips, plus a fix (see
-that section's step 4) for a real gap `install.sh` had until the Hetzner
-deploy-readiness review: it never copied `data/`, so a fresh box outside
-a repo checkout would crash-loop on first start.
+firewall steps around `install.sh` this section skips, plus two fixes for
+real gaps found during the Hetzner deploy-readiness review and the first
+real Hetzner deploy: `install.sh` never copied `data/` (see that
+section's step 5), so a fresh box outside a repo checkout would
+crash-loop on first start; and weather must be fetched *before*
+`install.sh` runs (step 4), or the same crash-loop happens anyway on a
+box that otherwise has no weather file yet.
 
 ### macOS (bridge PC)
 
@@ -190,19 +193,69 @@ this *is* the Linux build, there's no separate step. Both `api` and
 with both subcommands (design 11); the unused `capture` half is harmless
 dead weight here, not a problem to route around.
 
-### 4. Install
+### 4. Weather fetch (before install — avoids a fresh-box crash-loop)
+
+**Do this before step 5, not after.** `data/weather/*.npz` is gitignored,
+so this checkout has no weather file yet; `install.sh` only copies
+whatever's already in `data/`. Fetching first means the file rides along
+in that copy, and `stingray-planner.service` has real weather the very
+first time it starts — the original version of this runbook fetched
+weather *after* install/start and crash-looped on a fresh box until
+someone ran a fetch by hand (found live on the first real Hetzner
+deploy, 2026-07-13; see CLAUDE.md's gotcha).
+
+The `ingest` extras (cfgrib, needing the system `eccodes` C library) are
+deliberately **not** bundled into the `stingray` binary (kept out of the
+Windows/macOS builds, CLAUDE.md's gotcha) — cloud-role weather ingest runs
+as a separate, plain Python invocation, in its own venv (the same venv
+step 7 points cron at later):
+
+```
+sudo apt install -y libeccodes-dev libeccodes-tools
+sudo python3 -m venv /opt/stingray-ingest/venv
+sudo /opt/stingray-ingest/venv/bin/pip install -e ".[ingest]"
+# (run from the repo checkout, e.g. /home/<you>/stingray)
+```
+
+**Verified live on Ubuntu 24.04 (2026-07-13 Hetzner deploy)** — the
+standard `libeccodes-dev` apt package works, closing what was previously
+an open question (only macOS's `brew install eccodes` had been confirmed
+live before, ticket 0.5). Still worth running this smoke test on any new
+box before trusting cron with it, rather than assuming:
+
+```
+sudo /opt/stingray-ingest/venv/bin/python3 -c "import cfgrib; print('cfgrib OK')"
+cd /home/<you>/stingray && sudo /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_ecmwf
+ls data/weather/ecmwf_western_med.npz   # should exist now
+```
+
+Note **no `--out`** this time (unlike the cron lines in step 7) — this
+writes to the default `data/weather/ecmwf_western_med.npz`, *inside the
+checkout*, so step 5's `install.sh` copies it into `/opt/stingray/data/`
+along with everything else. If it produces a fresh `.npz` without error,
+the ingest path works end-to-end. If `pip install`/`import cfgrib` fails
+looking for `eccodes` symbols, `libeccodes-dev`'s packaged version is too
+old for this project's `cfgrib` pin — the documented fallback is `pip
+install eccodes` alone (the ECMWF Python package, which for common Linux
+platforms can vendor its own compiled ecCodes via a wheel, no system
+package needed) in place of the apt step; not pre-verified here either,
+try the apt route first since it's the standard documented path.
+
+### 5. Install
 
 ```
 sudo STINGRAY_ROLE=cloud ./deploy/linux/install.sh
 ```
 
-Copies the binary and `data/` (vessel spec, geography, a seed weather
-snapshot) to `/opt/stingray`, writes `/opt/stingray/.env` from the
-template, installs and starts `stingray-planner.service`. It will be
-running against placeholder credentials at this point — that's expected,
-fixed next.
+Copies the binary and `data/` (vessel spec, geography, and now the seed
+weather npz fetched in step 4) to `/opt/stingray`, writes
+`/opt/stingray/.env` from the template, installs and starts
+`stingray-planner.service`. It will be running against placeholder
+credentials at this point — that's expected, fixed next. `install.sh`
+itself warns (doesn't block) if `data/weather/` still ends up empty —
+that means step 4 was skipped or failed.
 
-### 5. Configure `.env`
+### 6. Configure `.env`
 
 ```
 sudo nano /opt/stingray/.env
@@ -230,44 +283,17 @@ curl -u <user>:<password> http://127.0.0.1:8000/v1/health
 The `curl` should return a JSON health payload. If it 401s, the
 credentials in `.env` and the ones you're `curl`ing with don't match. If
 the service isn't running at all, `journalctl -u stingray-planner -n 50
---no-pager` is the first thing to check — a `FileNotFoundError` there
-means step 4's `data/` copy didn't happen (confirm you're running
-`install.sh` from a full repo checkout, not just `dist/`).
+--no-pager` is the first thing to check — a "no weather file at ..."
+message there (not a bare traceback, as of the 2026-07-13 Hetzner deploy
+fix) means step 4's fetch didn't happen before this step ran; run it,
+`cp -r data/weather/. /opt/stingray/data/weather/`, and restart.
 
-### 6. Scheduled weather fetch (cloud role only)
+### 7. Scheduled weather fetch (cron)
 
-The `ingest` extras (cfgrib, needing the system `eccodes` C library) are
-deliberately **not** bundled into the `stingray` binary (kept out of the
-Windows/macOS builds, CLAUDE.md's gotcha) — cloud-role weather ingest runs
-as a separate, plain Python invocation via cron, in its own venv:
-
-```
-sudo apt install -y libeccodes-dev libeccodes-tools
-sudo python3 -m venv /opt/stingray-ingest/venv
-sudo /opt/stingray-ingest/venv/bin/pip install -e ".[ingest]"
-# (run from the repo checkout, e.g. /home/<you>/stingray)
-```
-
-**Not yet verified on Ubuntu 24.04 specifically** (only macOS's `brew
-install eccodes` has been confirmed live, ticket 0.5) — `libeccodes-dev`
-is Ubuntu's standard ecCodes package and has shipped since well before
-24.04, but confirm it before trusting cron with it:
-
-```
-sudo /opt/stingray-ingest/venv/bin/python3 -c "import cfgrib; print('cfgrib OK')"
-cd /home/<you>/stingray && sudo /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_ecmwf --out /opt/stingray/data/weather/ecmwf_western_med.npz
-```
-
-If that second command produces a fresh `.npz` without error, the ingest
-path works end-to-end. If `pip install`/`import cfgrib` fails looking for
-`eccodes` symbols, `libeccodes-dev`'s packaged version is too old for this
-project's `cfgrib` pin — the documented fallback is `pip install
-eccodes` alone (the ECMWF Python package, which for common Linux
-platforms can vendor its own compiled ecCodes via a wheel, no system
-package needed) in place of the apt step; not pre-verified here either,
-try the apt route first since it's the standard documented path.
-
-Once the smoke test above passes, install the actual schedule:
+Once step 4's manual fetch has confirmed the ingest path works, install
+the recurring schedule so weather stays current without anyone logging
+in — this needs `/opt/stingray` to already exist (step 5), since these
+lines write straight there:
 
 ```
 sudo crontab -e
@@ -275,7 +301,17 @@ sudo crontab -e
 # venv path to /opt/stingray-ingest/venv if you used a different one
 ```
 
-### 7. TLS (Caddy)
+Cadences match the real, confirmed-live cadences from ticket 0.5: NOMADS
+hourly-ish, ECMWF 3-hourly, each with its own confirmed publication delay
+and valid-cycle set (`ingest/grib_common.py`'s `latest_available_cycle_utc`
+— NOMADS 00/06/12/18z at ~5h delay, ECMWF 00/12z only at ~9h delay; the
+first Hetzner deploy picked ECMWF's not-yet-published 12z under NOMADS'
+looser assumptions before this was fixed). Both fetchers now also
+self-heal past a temporary "cycle not yet published" 404 by falling back
+to the previous cycle, logging each fallback step — check
+`/var/log/stingray-fetch-*.log` if you ever want to confirm one fired.
+
+### 8. TLS (Caddy)
 
 ```
 sudo apt install -y debian-keyring debian-archive-keyring apt-transport-https
@@ -304,7 +340,7 @@ curl -u <user>:<password> https://YOUR_DOMAIN/v1/health
 
 over real HTTPS, through Caddy, not `127.0.0.1:8000` directly.
 
-### 8. Firewall
+### 9. Firewall
 
 Confirm ports 80 and 443 are reachable from the public internet (Caddy
 needs them for the ACME challenge and to actually serve traffic) and port
@@ -319,7 +355,7 @@ sudo ufw status   # if ufw is active: allow 22,80,443/tcp, nothing else
 their web console — a `ufw` rule alone doesn't help if their edge
 firewall blocks the port first.)
 
-### 9. Point the demo at this instance
+### 10. Point the demo at this instance
 
 `prototype/stingray_planner.html`'s `API_BASE` constant (top of the
 `id="shared"` script block) still says `http://localhost:8000` — update
@@ -328,7 +364,7 @@ redeploy (`prototype/deploy/HOSTING.md` has the full mixed-content
 reasoning for why this must be the HTTPS URL, not HTTP, once the demo
 itself is served over HTTPS via GitHub Pages).
 
-### 10. End-to-end smoke test
+### 11. End-to-end smoke test
 
 The same sequence used to verify ticket B2 locally, now against the real
 deployment:
@@ -361,21 +397,33 @@ renders (the one verification step this runbook can't script for you).
 
 - [x] Real trial build on macOS/arm64 — planner + capture subcommands
   both run correctly (this session).
-- [ ] Real Windows and Linux CI-runner builds (`deploy/build-installers.yml`).
-- [ ] Real Ubuntu 24.04 cloud deploy (Hetzner CPX21, planned this week) —
-  the "Cloud VM runbook" section above is written and reviewed against a
-  fresh-box mental model (and fixed one real gap it found: `install.sh`
-  wasn't copying `data/`), but not yet run against a real box end to end.
-  The one specifically flagged unknown: whether Ubuntu 24.04's
-  `libeccodes-dev` apt package is new enough for this project's `cfgrib`
-  pin (step 6's smoke test is the thing to watch).
+- [ ] Real Windows and Linux CI-runner builds (`deploy/build-installers.yml`)
+  — the Linux **target-box** build (below) is now verified; the CI-matrix
+  build specifically is still untried.
+- [x] **Real Ubuntu 24.04 cloud deploy (Hetzner CPX21) — done 2026-07-13.**
+  `api.stingraymarinetechnology.com` served over Caddy TLS, cron
+  installed, the hosted demo running end-to-end against it. Verified live
+  this deploy: the Linux PyInstaller build on the actual target box;
+  `install.sh` including the `data/` copy fix; Ubuntu 24.04's
+  `libeccodes-dev` apt route (cfgrib imports and fetches cleanly — the
+  previously-flagged unknown is closed). Found and fixed three real
+  defects in the process — see `docs/plans/deploy-findings-2026-07-13.md`
+  and `docs/plans/deploy-findings-2026-07-13-fixes.md` — before trusting
+  cron unattended: a runbook-ordering fresh-box crash-loop, wrong
+  per-source cycle-publication assumptions for ECMWF, and no fallback on
+  a missing cycle.
 - [ ] Real gateway smoke test: one real YDEN-02 and/or Actisense unit,
   `stingray capture` logs real frames to SQLite (`capture/gateway.py`'s
   protocol parsing is verified against cited real-world examples and
   canboat's reference implementation, not yet against physical hardware).
 - [ ] Real weather-sync smoke test: a cloud-role instance fetching live,
-  a vessel-role instance pulling from it, hot-swap firing end-to-end.
-- [ ] Real TLS check: Caddy obtaining a real Let's Encrypt cert against a
-  real public domain.
-- [ ] Human sanity check: HTTP Basic Auth prompt appears and correctly
-  gates access in a real browser before calling any demo ready.
+  a vessel-role instance pulling from it, hot-swap firing end-to-end
+  (this deploy verified the cloud-role cron fetch and demo-facing side;
+  a real vessel-role instance pulling from it is still untried).
+- [x] Real TLS check: Caddy obtaining a real Let's Encrypt cert against a
+  real public domain — done 2026-07-13 (`api.stingraymarinetechnology.com`).
+- [x] Human sanity check: HTTP Basic Auth prompt appears and correctly
+  gates access in a real browser — implied by the hosted demo running
+  end-to-end against the real deployment this deploy (the demo only ever
+  renders a plan if the browser successfully authenticated against the
+  Basic-Auth-gated API).

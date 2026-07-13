@@ -1,4 +1,6 @@
+import logging
 import math
+import urllib.error
 from datetime import UTC, datetime
 
 import numpy as np
@@ -7,10 +9,12 @@ import xarray as xr
 
 from ingest.grib_common import (
     direction_to_from_convention_deg,
+    fetch_with_cycle_fallback,
     latest_available_cycle_utc,
     mask_land_as_missing,
     normalise_and_sort_dataset,
     normalise_longitude_deg,
+    previous_cycle_utc,
     write_npz_atomic,
 )
 
@@ -105,6 +109,133 @@ def test_latest_available_cycle_utc_default_delay_is_deterministic():
     date_str, hour_str = latest_available_cycle_utc(now_utc)
     assert date_str == "20260707"
     assert hour_str in {"00", "06", "12", "18"}
+
+
+def test_latest_available_cycle_utc_respects_restricted_valid_hours():
+    """The exact live-observed failure (2026-07-13 Hetzner deploy): under
+    the old fixed-6-hourly logic, 17:16 UTC with a 9h delay would land on
+    08:16 available -> round to 06z, which ECMWF's oper/wave streams
+    never publish. With valid_hours=(0, 12), it must select 00z."""
+    now_utc = datetime(2026, 7, 13, 17, 16, tzinfo=UTC)
+    assert latest_available_cycle_utc(now_utc, delay_h=9.0, valid_hours=(0, 12)) == (
+        "20260713",
+        "00",
+    )
+
+
+@pytest.mark.parametrize(
+    "now_iso",
+    [
+        "2026-07-13T00:00:00+00:00",
+        "2026-07-13T05:59:00+00:00",
+        "2026-07-13T11:59:00+00:00",
+        "2026-07-13T17:59:00+00:00",
+        "2026-07-13T23:59:00+00:00",
+    ],
+)
+def test_latest_available_cycle_utc_never_selects_06_or_18_for_restricted_set(now_iso):
+    now_utc = datetime.fromisoformat(now_iso)
+    _, hour_str = latest_available_cycle_utc(now_utc, delay_h=0.0, valid_hours=(0, 12))
+    assert hour_str in {"00", "12"}
+
+
+def test_latest_available_cycle_utc_restricted_set_day_rollback():
+    # 02:00 - 9h = previous day 17:00 -> latest of (0, 12) at/before 17 is 12z, previous day.
+    now_utc = datetime(2026, 7, 13, 2, 0, tzinfo=UTC)
+    assert latest_available_cycle_utc(now_utc, delay_h=9.0, valid_hours=(0, 12)) == (
+        "20260712",
+        "12",
+    )
+
+
+@pytest.mark.parametrize(
+    "cycle_date,cycle_hour,valid_hours,expected",
+    [
+        ("20260713", "12", (0, 12), ("20260713", "00")),
+        ("20260713", "00", (0, 12), ("20260712", "12")),
+        ("20260713", "00", (0, 6, 12, 18), ("20260712", "18")),
+        ("20260713", "18", (0, 6, 12, 18), ("20260713", "12")),
+    ],
+)
+def test_previous_cycle_utc(cycle_date, cycle_hour, valid_hours, expected):
+    assert previous_cycle_utc(cycle_date, cycle_hour, valid_hours=valid_hours) == expected
+
+
+def _http_error(code: int) -> urllib.error.HTTPError:
+    return urllib.error.HTTPError(
+        url="http://example.invalid", code=code, msg="", hdrs=None, fp=None
+    )
+
+
+def test_fetch_with_cycle_fallback_steps_back_on_404_until_success():
+    calls: list[tuple[str, str]] = []
+
+    def attempt(date: str, hour: str) -> str:
+        calls.append((date, hour))
+        if (date, hour) == ("20260713", "00"):
+            return "ok"
+        raise _http_error(404)
+
+    date, hour, result = fetch_with_cycle_fallback(
+        "20260713",
+        "12",
+        valid_hours=(0, 12),
+        max_attempts=3,
+        attempt=attempt,
+    )
+
+    assert (date, hour, result) == ("20260713", "00", "ok")
+    assert calls == [("20260713", "12"), ("20260713", "00")]
+
+
+def test_fetch_with_cycle_fallback_logs_each_fallback_step(caplog):
+    def attempt(date: str, hour: str) -> str:
+        if (date, hour) == ("20260713", "00"):
+            return "ok"
+        raise _http_error(404)
+
+    with caplog.at_level(logging.WARNING, logger="ingest.grib_common"):
+        fetch_with_cycle_fallback(
+            "20260713", "12", valid_hours=(0, 12), max_attempts=3, attempt=attempt
+        )
+
+    assert len(caplog.records) == 1
+    message = caplog.records[0].getMessage()
+    assert "20260713" in message and "12" in message  # old cycle
+    assert "404" in message  # reason
+    assert "00" in message  # new cycle
+
+
+def test_fetch_with_cycle_fallback_propagates_non_404_immediately():
+    calls = []
+
+    def attempt(date: str, hour: str) -> str:
+        calls.append((date, hour))
+        raise _http_error(500)
+
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        fetch_with_cycle_fallback(
+            "20260713", "12", valid_hours=(0, 12), max_attempts=3, attempt=attempt
+        )
+
+    assert excinfo.value.code == 500
+    assert calls == [("20260713", "12")]  # no retry on a non-404 failure
+
+
+def test_fetch_with_cycle_fallback_reraises_after_exhausting_max_attempts():
+    calls = []
+
+    def attempt(date: str, hour: str) -> str:
+        calls.append((date, hour))
+        raise _http_error(404)
+
+    with pytest.raises(urllib.error.HTTPError) as excinfo:
+        fetch_with_cycle_fallback(
+            "20260713", "12", valid_hours=(0, 12), max_attempts=3, attempt=attempt
+        )
+
+    assert excinfo.value.code == 404
+    assert len(calls) == 3  # max_attempts, not swallowed forever
 
 
 def test_write_npz_atomic_round_trips_and_leaves_no_tmp_file(tmp_path):

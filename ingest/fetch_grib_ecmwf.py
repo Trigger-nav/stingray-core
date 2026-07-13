@@ -52,6 +52,7 @@ import xarray as xr
 from core.geography import OPERATING_AREA_BBOX, RealGeography
 from core.optimiser import DEFAULT_HORIZON_H
 from ingest.grib_common import (
+    fetch_with_cycle_fallback,
     latest_available_cycle_utc,
     mask_land_as_missing,
     normalise_and_sort_dataset,
@@ -60,6 +61,18 @@ from ingest.grib_common import (
 
 ECMWF_BASE = "https://data.ecmwf.int/forecasts"
 STEP_H = 3  # confirmed cadence (scoping)
+
+# Found live during the 2026-07-13 Hetzner deploy (finding #2): ECMWF open
+# data's oper/wave streams only ever publish 00z/12z (never 06z/18z), and
+# take ~8-9h to fully publish, not NOMADS' ~5h -- a run using NOMADS'
+# defaults picked today's not-yet-published 12z and died on HTTP 404
+# fetching the .index sidecar. See CLAUDE.md's gotcha for the full trace.
+ECMWF_DELAY_H = 9.0
+ECMWF_VALID_HOURS = (0, 12)
+# How many cycles fetch_with_cycle_fallback will step back on a 404 before
+# giving up -- 3 covers 24h back at ECMWF's 12-hourly cadence, comfortably
+# past any realistic publication-timing race.
+MAX_CYCLE_FALLBACK_ATTEMPTS = 3
 
 WIND_PARAMS = {"u10_ms": "10u", "v10_ms": "10v"}
 WAVE_PARAMS = {"hs_m": "swh", "dir_deg": "mwd", "period_peak_s": "pp1d", "period_mean_s": "mwp"}
@@ -175,14 +188,25 @@ def main() -> None:
     args = parser.parse_args()
 
     now_utc = datetime.now(UTC)
-    if args.cycle_date and args.cycle_hour:
-        cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
-    else:
-        cycle_date, cycle_hour = latest_available_cycle_utc(now_utc)
-
-    print(f"fetching ECMWF IFS cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
     geography = RealGeography()
-    grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+    if args.cycle_date and args.cycle_hour:
+        # An explicit cycle is a human asking for exactly that cycle --
+        # get it or a clear error, not a silent fallback substitution.
+        cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
+        print(f"fetching ECMWF IFS cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
+        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+    else:
+        cycle_date, cycle_hour = latest_available_cycle_utc(
+            now_utc, delay_h=ECMWF_DELAY_H, valid_hours=ECMWF_VALID_HOURS
+        )
+        print(f"fetching ECMWF IFS cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
+        cycle_date, cycle_hour, grid = fetch_with_cycle_fallback(
+            cycle_date,
+            cycle_hour,
+            valid_hours=ECMWF_VALID_HOURS,
+            max_attempts=MAX_CYCLE_FALLBACK_ATTEMPTS,
+            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography),
+        )
 
     write_npz_atomic(
         Path(args.out),

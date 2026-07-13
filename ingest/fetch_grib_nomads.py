@@ -52,6 +52,7 @@ from core.optimiser import DEFAULT_HORIZON_H
 from ingest.grib_common import (
     WW3_DIRECTION_IS_TO_CONVENTION,
     direction_to_from_convention_deg,
+    fetch_with_cycle_fallback,
     latest_available_cycle_utc,
     mask_land_as_missing,
     normalise_and_sort_dataset,
@@ -60,6 +61,18 @@ from ingest.grib_common import (
 
 NOMADS_BASE = "https://nomads.ncep.noaa.gov/cgi-bin"
 STEP_H = 1  # confirmed hourly GFS wind + WW3 wave availability through 48h+ (scoping)
+
+# Confirmed cadence during ticket 0.5 scoping: NOMADS' 6-hourly cycle grid,
+# fully published ~5h after cycle time. Explicit here (not just leaning on
+# grib_common's matching defaults) so it's self-documenting and symmetric
+# with fetch_grib_ecmwf.py's differing constants -- see CLAUDE.md's
+# 2026-07-13 Hetzner deploy gotcha.
+NOMADS_DELAY_H = 5.0
+NOMADS_VALID_HOURS = (0, 6, 12, 18)
+# How many cycles fetch_with_cycle_fallback will step back on a 404 before
+# giving up -- 3 covers 12h back at NOMADS' 6-hourly cadence, comfortably
+# past any realistic publication-timing race.
+MAX_CYCLE_FALLBACK_ATTEMPTS = 3
 
 # Confirmed cfgrib shortNames (2026-07-07 first real run, cross-checked
 # directly against the committed fixtures in tests/fixtures/grib/ -- see
@@ -213,14 +226,25 @@ def main() -> None:
     args = parser.parse_args()
 
     now_utc = datetime.now(UTC)
-    if args.cycle_date and args.cycle_hour:
-        cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
-    else:
-        cycle_date, cycle_hour = latest_available_cycle_utc(now_utc)
-
-    print(f"fetching GFS+WW3 cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
     geography = RealGeography()
-    grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+    if args.cycle_date and args.cycle_hour:
+        # An explicit cycle is a human asking for exactly that cycle --
+        # get it or a clear error, not a silent fallback substitution.
+        cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
+        print(f"fetching GFS+WW3 cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
+        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+    else:
+        cycle_date, cycle_hour = latest_available_cycle_utc(
+            now_utc, delay_h=NOMADS_DELAY_H, valid_hours=NOMADS_VALID_HOURS
+        )
+        print(f"fetching GFS+WW3 cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
+        cycle_date, cycle_hour, grid = fetch_with_cycle_fallback(
+            cycle_date,
+            cycle_hour,
+            valid_hours=NOMADS_VALID_HOURS,
+            max_attempts=MAX_CYCLE_FALLBACK_ATTEMPTS,
+            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography),
+        )
 
     write_npz_atomic(
         Path(args.out),
