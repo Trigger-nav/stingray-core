@@ -16,33 +16,43 @@ from api import schemas
 from core import optimiser, units, vessel_spec, weights
 
 # (core dataclass, pydantic model, {core-only field names that are a
-# deliberate, reviewed omission -- not accidental drift}).
+# deliberate, reviewed omission -- not accidental drift}, {model-only field
+# names that are a deliberate, reviewed addition}). The fourth element
+# defaults to set() for every pair except PlanRequest/PlanRequestIn --
+# added for ticket R1's pack_id (API) <-> region_pack (core) pair, the
+# first field in this table that isn't a straight 1:1 name match: the API
+# takes a string key (a client-facing wire schema has no business
+# embedding a whole RegionPack), core.optimiser.PlanRequest takes the
+# resolved RegionPack object itself (api/convert.py does the resolution).
 PAIRS = [
-    (units.LatLon, schemas.LatLonModel, set()),
-    (vessel_spec.HullParticulars, schemas.HullParticularsModel, set()),
-    (vessel_spec.CalmResistanceCurve, schemas.CalmResistanceCurveModel, set()),
+    (units.LatLon, schemas.LatLonModel, set(), set()),
+    (vessel_spec.HullParticulars, schemas.HullParticularsModel, set(), set()),
+    (vessel_spec.CalmResistanceCurve, schemas.CalmResistanceCurveModel, set(), set()),
     (
         vessel_spec.AddedResistanceCoefficients,
         schemas.AddedResistanceCoefficientsModel,
         set(),
+        set(),
     ),
-    (vessel_spec.EngineSpec, schemas.EngineSpecModel, set()),
-    (vessel_spec.ComfortCoefficients, schemas.ComfortCoefficientsModel, set()),
-    (vessel_spec.WearPolicy, schemas.WearPolicyModel, set()),
-    (vessel_spec.VesselSpec, schemas.VesselSpecModel, set()),
+    (vessel_spec.EngineSpec, schemas.EngineSpecModel, set(), set()),
+    (vessel_spec.ComfortCoefficients, schemas.ComfortCoefficientsModel, set(), set()),
+    (vessel_spec.WearPolicy, schemas.WearPolicyModel, set(), set()),
+    (vessel_spec.VesselSpec, schemas.VesselSpecModel, set(), set()),
     (
         optimiser.PlanRequest,
         schemas.PlanRequestIn,
         # weather/geography are server-side singleton state (api/state.py),
         # never a client-supplied payload -- see PlanRequestIn's docstring.
-        {"weather", "geography"},
+        # region_pack is resolved from pack_id (below), not mirrored 1:1.
+        {"weather", "geography", "region_pack"},
+        {"pack_id"},
     ),
-    (optimiser.LegTarget, schemas.LegTargetModel, set()),
-    (optimiser.Alteration, schemas.AlterationModel, set()),
-    (optimiser.Candidate, schemas.CandidateModel, set()),
-    (optimiser.PruneDiagnostic, schemas.PruneDiagnosticModel, set()),
-    (weights.Weights, schemas.WeightsModel, set()),
-    (optimiser.PlanResult, schemas.PlanResultOut, set()),
+    (optimiser.LegTarget, schemas.LegTargetModel, set(), set()),
+    (optimiser.Alteration, schemas.AlterationModel, set(), set()),
+    (optimiser.Candidate, schemas.CandidateModel, set(), set()),
+    (optimiser.PruneDiagnostic, schemas.PruneDiagnosticModel, set(), set()),
+    (weights.Weights, schemas.WeightsModel, set(), set()),
+    (optimiser.PlanResult, schemas.PlanResultOut, set(), set()),
 ]
 
 
@@ -55,13 +65,13 @@ def _model_field_names(model: type) -> set[str]:
 
 
 def test_all_pairs_are_dataclasses_and_models():
-    for core_dc, model, _ in PAIRS:
+    for core_dc, model, _, _ in PAIRS:
         assert dataclasses.is_dataclass(core_dc), f"{core_dc} is not a dataclass"
         assert hasattr(model, "model_fields"), f"{model} is not a pydantic model"
 
 
 def test_no_undeclared_field_drift():
-    for core_dc, model, allowed_core_only in PAIRS:
+    for core_dc, model, allowed_core_only, allowed_model_only in PAIRS:
         core_fields = _core_field_names(core_dc)
         model_fields = _model_field_names(model)
 
@@ -75,17 +85,27 @@ def test_no_undeclared_field_drift():
         )
         # A pydantic-only field is never intentional for a straight mirror
         # (PlanRequestIn's extra `vessel` field is a same-name match, not
-        # pydantic-only) -- any surviving model_only field is drift.
-        assert not model_only, (
-            f"{model.__name__} has fields not present in {core_dc.__name__}: "
-            f"{model_only} -- either core/ dropped a field or the mirror "
-            f"added one that needs an explicit allow-list entry"
+        # pydantic-only) unless explicitly allow-listed (ticket R1's
+        # pack_id, resolved into core's differently-named region_pack) --
+        # any other surviving model_only field is drift.
+        unexplained_model_only = model_only - allowed_model_only
+        assert not unexplained_model_only, (
+            f"{model.__name__} has fields not present in {core_dc.__name__} "
+            f"and not in its allow-list: {unexplained_model_only} -- either "
+            f"core/ dropped a field or the mirror added one that needs an "
+            f"explicit allow-list entry"
         )
         # allow-list entries that no longer describe a real gap are stale
         # and should be removed, not left to silently mask a future typo.
-        stale_allowed = allowed_core_only - core_only
-        assert not stale_allowed, (
-            f"{core_dc.__name__}'s allow-list claims {stale_allowed} is a "
+        stale_allowed_core_only = allowed_core_only - core_only
+        assert not stale_allowed_core_only, (
+            f"{core_dc.__name__}'s allow-list claims {stale_allowed_core_only} is a "
             f"deliberate omission, but it's actually present in "
             f"{model.__name__} now -- remove it from the allow-list"
+        )
+        stale_allowed_model_only = allowed_model_only - model_only
+        assert not stale_allowed_model_only, (
+            f"{model.__name__}'s allow-list claims {stale_allowed_model_only} is a "
+            f"deliberate addition, but it's actually present in "
+            f"{core_dc.__name__} now -- remove it from the allow-list"
         )

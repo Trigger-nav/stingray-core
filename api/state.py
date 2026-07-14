@@ -16,14 +16,18 @@ single job would defeat the point of reusing the cache at all.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 import os
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass
 
+import yaml
+
 from api.config import Settings
 from core.geography import Geography, RealGeography
-from core.optimiser import DEFAULT_DESTINATION, DEFAULT_ORIGIN, PlanRequest, PlanResult, optimise
+from core.optimiser import PlanRequest, PlanResult, optimise
+from core.regionpack import MED_PACK, RegionPack, resolve_pack_endpoint
 from core.units import LatLon
 from core.vessel_spec import VesselSpec
 from core.weather import GriddedWeatherField, WeatherField
@@ -31,10 +35,18 @@ from core.weather import GriddedWeatherField, WeatherField
 logger = logging.getLogger(__name__)
 
 # --- Worker-process globals (set once per worker by _worker_init) ----------
+#
+# Ticket R1: dict-keyed by pack_id, not single values -- a worker now
+# holds every configured pack's geography/weather, since a job (payload)
+# names which pack it targets. `_worker_vessel`/`_worker_region_packs`
+# stay/become process-wide (vessel identity isn't region-scoped;
+# region_packs is needed to resolve a payload's pack_id back to the full
+# RegionPack object PlanRequest.region_pack wants).
 
-_worker_geography: Geography | None = None
-_worker_weather: WeatherField | None = None
+_worker_geography: dict[str, Geography] = {}
+_worker_weather: dict[str, WeatherField] = {}
 _worker_vessel: VesselSpec | None = None
+_worker_region_packs: dict[str, RegionPack] = {}
 
 
 def _geography_kwargs(config: Settings) -> dict[str, str]:
@@ -48,6 +60,42 @@ def _geography_kwargs(config: Settings) -> dict[str, str]:
     if config.tss_path:
         kwargs["tss_path"] = config.tss_path
     return kwargs
+
+
+def load_region_packs(config: Settings) -> dict[str, RegionPack]:
+    """Ticket R1: `config.region_packs_path` unset (every currently-
+    deployed instance) -> synthesize a single implicit "med" pack from
+    today's flat `coastline_path`/etc. fields (via `_geography_kwargs`,
+    the exact mechanism `RealGeography()` used before this ticket) --
+    zero migration forced on any existing deployment. Set -> load every
+    pack manifest path the file lists via `RegionPack.from_yaml`, keyed
+    by each pack's own `pack_id`."""
+    if config.region_packs_path is None:
+        pack = dataclasses.replace(
+            MED_PACK,
+            weather_npz_path=config.weather_npz_path,
+            **_geography_kwargs(config),
+        )
+        return {pack.pack_id: pack}
+    with open(config.region_packs_path) as f:
+        raw = yaml.safe_load(f)
+    packs: dict[str, RegionPack] = {}
+    for pack_path in raw["packs"]:
+        pack = RegionPack.from_yaml(pack_path)
+        packs[pack.pack_id] = pack
+    return packs
+
+
+DEFAULT_PACK_ID = "med"
+
+
+def _default_pack_id(region_packs: dict[str, RegionPack]) -> str:
+    """Which pack a pack-agnostic surface (GET /v1/health) reports on --
+    "med" if configured, else arbitrarily the first configured pack. Not
+    used by anything that resolves a specific request's own pack_id."""
+    if DEFAULT_PACK_ID in region_packs:
+        return DEFAULT_PACK_ID
+    return next(iter(region_packs))
 
 
 def _load_weather(path: str) -> WeatherField:
@@ -94,29 +142,48 @@ def _worker_init(config: Settings) -> None:
     startup (`wait_until_ready`, below, still gates readiness on this)
     rather than surfacing as a confusing mid-search failure on a real
     user's first request."""
-    global _worker_geography, _worker_weather, _worker_vessel
-    _worker_geography = RealGeography(**_geography_kwargs(config))
-    _worker_weather = _load_weather(config.weather_npz_path)
+    global _worker_geography, _worker_weather, _worker_vessel, _worker_region_packs
+    _worker_region_packs = load_region_packs(config)
+    _worker_geography = {
+        pid: RealGeography.from_pack(pack) for pid, pack in _worker_region_packs.items()
+    }
+    _worker_weather = {
+        pid: _load_weather(pack.weather_npz_path) for pid, pack in _worker_region_packs.items()
+    }
     _worker_vessel = VesselSpec.from_yaml(config.vessel_spec_path)
-    _validate_weather_sane(_worker_weather, _worker_geography)
+    _validate_weather_sane(_worker_weather, _worker_geography, _worker_region_packs)
 
 
-def _validate_weather_sane(weather: WeatherField, geography: Geography) -> None:
+def _validate_weather_sane(
+    weather: dict[str, WeatherField],
+    geography: dict[str, Geography],
+    region_packs: dict[str, RegionPack],
+) -> None:
     """Cheap (milliseconds, not the ~19s a full `optimise()` call would
-    cost) sanity check: sample a couple of real, navigable points and
-    confirm they don't come back NaN -- catches an obviously mismatched
-    bbox or corrupt npz at startup instead of during a real search."""
-    for point in (DEFAULT_ORIGIN, DEFAULT_DESTINATION):
-        sample = weather.sample(point.lat_deg, point.lon_deg, 0.0)
-        if any(
-            v != v  # NaN check without importing math for one comparison
-            for v in (sample.hs_m, sample.wind_u_ms, sample.wind_v_ms)
-        ):
-            logger.warning(
-                "weather sample at %s is NaN -- npz may not cover the "
-                "default operating area, or the file is stale/corrupt",
-                point,
-            )
+    cost) sanity check: sample a couple of real, navigable points *per
+    configured pack* and confirm they don't come back NaN -- catches an
+    obviously mismatched bbox or corrupt npz at startup instead of during
+    a real search. Ticket R1: looped over every pack rather than a single
+    hardcoded DEFAULT_ORIGIN/DEFAULT_DESTINATION check -- a pack with no
+    default_origin/default_destination configured (not yet expected in
+    practice, but not structurally impossible) is skipped, not an error
+    here specifically (resolve_pack_endpoint is what enforces that a real
+    plan request against such a pack must supply explicit endpoints)."""
+    for pid, pack in region_packs.items():
+        if pack.default_origin is None or pack.default_destination is None:
+            continue
+        for point in (pack.default_origin, pack.default_destination):
+            sample = weather[pid].sample(point.lat_deg, point.lon_deg, 0.0)
+            if any(
+                v != v  # NaN check without importing math for one comparison
+                for v in (sample.hs_m, sample.wind_u_ms, sample.wind_v_ms)
+            ):
+                logger.warning(
+                    "pack %r: weather sample at %s is NaN -- npz may not cover the "
+                    "pack's operating area, or the file is stale/corrupt",
+                    pid,
+                    point,
+                )
 
 
 @dataclass(frozen=True)
@@ -130,6 +197,7 @@ class PlanJobPayload:
 
     pace: float
     comfort: float
+    pack_id: str
     origin: LatLon | None
     destination: LatLon | None
     origin_is_anchorage: bool
@@ -145,18 +213,34 @@ def run_plan_job(payload: PlanJobPayload) -> PlanResult:
     must be a module-level function (picklable) and must only read this
     module's worker-process-local globals, never a reference into the
     parent process's memory."""
-    if _worker_geography is None or _worker_weather is None or _worker_vessel is None:
+    if not _worker_geography or not _worker_weather or _worker_vessel is None:
         raise RuntimeError("worker process not initialised -- _worker_init did not run")
+    try:
+        geography = _worker_geography[payload.pack_id]
+        weather = _worker_weather[payload.pack_id]
+        region_pack = _worker_region_packs[payload.pack_id]
+    except KeyError:
+        # ValueError, not RuntimeError: an unknown pack_id is a client
+        # input error (api/jobs.py's _classify_error maps ValueError to
+        # HTTP 422 "invalid_request", not a 500) -- distinguishable from
+        # "_worker_init did not run" above, which genuinely is an
+        # internal/infra error.
+        raise ValueError(
+            f"unknown region pack {payload.pack_id!r} -- this worker has "
+            f"{sorted(_worker_region_packs)} configured"
+        ) from None
+    origin, destination = resolve_pack_endpoint(region_pack, payload.origin, payload.destination)
     request = PlanRequest(
-        weather=_worker_weather,
-        geography=_worker_geography,
+        weather=weather,
+        geography=geography,
         vessel=payload.vessel_override or _worker_vessel,
         pace=payload.pace,
         comfort=payload.comfort,
-        origin=payload.origin or DEFAULT_ORIGIN,
-        destination=payload.destination or DEFAULT_DESTINATION,
+        origin=origin,
+        destination=destination,
         origin_is_anchorage=payload.origin_is_anchorage,
         destination_is_anchorage=payload.destination_is_anchorage,
+        region_pack=region_pack,
         latest_arrival_h=payload.latest_arrival_h,
         departure_t0_h=payload.departure_t0_h,
         speeds_kn=payload.speeds_kn,
@@ -214,23 +298,35 @@ def _wait_pool_ready(executor: ProcessPoolExecutor, pool_size: int) -> None:
 
 
 class AppState:
-    """Constructed once in `api/main.py`'s lifespan. `geography`/`vessel`
-    are static for the process lifetime (nothing in this ticket changes
-    them at runtime). `weather` is refreshed by the hot-swap watcher below
-    -- kept here purely for `GET /v1/health`'s provenance display and to
-    satisfy `PlanRequest`'s mandatory `weather` field during the
-    synchronous, main-process fail-fast validation pass (design 10); the
-    actual `optimise()` call always runs in a worker against *that*
-    worker's own weather instance, not this one."""
+    """Constructed once in `api/main.py`'s lifespan. `geography`/`vessel`/
+    `region_packs` are static for the process lifetime (nothing in this
+    ticket changes them at runtime). `weather` is refreshed by the
+    hot-swap watcher below -- kept here purely for `GET /v1/health`'s
+    provenance display and to satisfy `PlanRequest`'s mandatory `weather`
+    field during the synchronous, main-process fail-fast validation pass
+    (design 10); the actual `optimise()` call always runs in a worker
+    against *that* worker's own weather instance, not this one.
+
+    Ticket R1: `geography`/`weather` are dict-keyed by `pack_id` -- a
+    single-pack deployment (every existing one, `region_packs_path`
+    unset) still gets exactly one entry, "med", so nothing here changes
+    observable behaviour for those; `region_packs` itself is new,
+    exposing every configured `RegionPack` for routes.py to resolve a
+    request's `pack_id` against."""
 
     def __init__(self, config: Settings) -> None:
         self.config = config
-        self.geography: Geography = RealGeography(**_geography_kwargs(config))
+        self.region_packs: dict[str, RegionPack] = load_region_packs(config)
+        self.geography: dict[str, Geography] = {
+            pid: RealGeography.from_pack(pack) for pid, pack in self.region_packs.items()
+        }
         self.vessel: VesselSpec = VesselSpec.from_yaml(config.vessel_spec_path)
-        self.weather: WeatherField = _load_weather(config.weather_npz_path)
+        self.weather: dict[str, WeatherField] = {
+            pid: _load_weather(pack.weather_npz_path) for pid, pack in self.region_packs.items()
+        }
         self._pool_size = _resolved_pool_size(config)
         self.executor_holder = ExecutorHolder(_build_executor(config))
-        self._last_weather_mtime = self._current_weather_mtime()
+        self._last_weather_mtimes = self._current_weather_mtimes()
         self._watch_task: asyncio.Task | None = None
 
     async def wait_until_ready(self) -> None:
@@ -246,11 +342,14 @@ class AppState:
         hot-swap path below."""
         await asyncio.to_thread(_wait_pool_ready, self.executor_holder.executor, self._pool_size)
 
-    def _current_weather_mtime(self) -> float | None:
-        try:
-            return os.path.getmtime(self.config.weather_npz_path)
-        except OSError:
-            return None
+    def _current_weather_mtimes(self) -> dict[str, float | None]:
+        mtimes: dict[str, float | None] = {}
+        for pid, pack in self.region_packs.items():
+            try:
+                mtimes[pid] = os.path.getmtime(pack.weather_npz_path)
+            except OSError:
+                mtimes[pid] = None
+        return mtimes
 
     async def start_weather_watch(self) -> None:
         self._watch_task = asyncio.create_task(self._weather_watch_loop())
@@ -272,23 +371,35 @@ class AppState:
                 logger.exception("weather hot-swap check failed, will retry")
 
     async def _check_and_swap(self) -> None:
-        mtime = self._current_weather_mtime()
-        if mtime is None or mtime == self._last_weather_mtime:
+        """Ticket R1: watches *every* configured pack's weather npz mtime,
+        not one. A change in any single pack's file triggers a full-pool
+        rebuild that reloads every configured pack fresh (via
+        `_worker_init`, looped) -- the same mechanism the single-pack
+        design already used to hot-swap, just extended to N packs rather
+        than made surgically per-pack; not worth a more targeted in-place
+        refresh at the pack counts (2) this ticket ships with. An
+        untouched pack's reloaded value is identical to its old one (same
+        file, same content), so this is a cost/simplicity tradeoff, not a
+        correctness one."""
+        mtimes = self._current_weather_mtimes()
+        if mtimes == self._last_weather_mtimes or all(m is None for m in mtimes.values()):
             return
-        # Load in the main process first -- validates the file is a
-        # well-formed, complete npz *before* committing to the (relatively
-        # expensive) pool swap; an in-progress/partial write from the
-        # sync/cron side would fail here and simply retry next tick rather
-        # than swapping to a broken pool.
-        new_weather = _load_weather(self.config.weather_npz_path)
+        # Load every pack's weather in the main process first -- validates
+        # each file is a well-formed, complete npz *before* committing to
+        # the (relatively expensive) pool swap; an in-progress/partial
+        # write from the sync/cron side would fail here and simply retry
+        # next tick rather than swapping to a broken pool.
+        new_weather = {
+            pid: _load_weather(pack.weather_npz_path) for pid, pack in self.region_packs.items()
+        }
         old_executor = self.executor_holder.executor
         new_executor = _build_executor(self.config)
         # Wait for the new pool to finish initialising (same mechanism as
         # startup) before publishing it -- a worker whose _worker_init
         # hasn't returned yet can't accept a submitted job at all (it would
         # just queue silently behind the still-running initializer), and
-        # this also re-runs _validate_weather_sane against the new file
-        # before anything real depends on it. This await runs inside the
+        # this also re-runs _validate_weather_sane against the new files
+        # before anything real depends on them. This await runs inside the
         # background weather-watch task, off the event loop already (see
         # _weather_watch_loop) -- nothing else stalls while it happens;
         # the *old* pool keeps serving all traffic in the meantime, exactly
@@ -302,7 +413,7 @@ class AppState:
         # means the event loop never stalls on shutdown(wait=True) either.
         self.executor_holder.executor = new_executor
         self.weather = new_weather
-        self._last_weather_mtime = mtime
+        self._last_weather_mtimes = mtimes
         logger.info("weather hot-swap: warmed new pool published, draining old pool in background")
         asyncio.create_task(asyncio.to_thread(old_executor.shutdown, wait=True))
 

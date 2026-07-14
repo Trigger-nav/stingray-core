@@ -27,8 +27,6 @@ from api.schemas import (
 )
 from core.geography import Geography
 from core.optimiser import (
-    DEFAULT_DESTINATION,
-    DEFAULT_ORIGIN,
     Alteration,
     Candidate,
     LegTarget,
@@ -36,6 +34,7 @@ from core.optimiser import (
     PlanResult,
     PruneDiagnostic,
 )
+from core.regionpack import RegionPack, resolve_pack_endpoint
 from core.units import LatLon
 from core.vessel_spec import (
     AddedResistanceCoefficients,
@@ -98,27 +97,35 @@ def plan_request_from_in(
     default_vessel: VesselSpec,
     weather: WeatherField,
     geography: Geography,
+    region_pack: RegionPack,
 ) -> PlanRequest:
     """`weather`/`geography` are the server's shared singleton state
     (api/state.py) -- never client-supplied, see PlanRequestIn's docstring.
-    Omitted origin/destination fall back to the exact same
-    DEFAULT_ORIGIN/DEFAULT_DESTINATION core.optimiser.PlanRequest itself
-    defaults to, so an omitted field behaves identically whether the
-    default is applied here or inside core."""
+    `region_pack` is the object already resolved from `body.pack_id` by
+    the caller (api/routes.py, via `AppState`'s per-pack dicts -- ticket
+    R1) -- this function stays a pure conversion, with no AppState-shaped
+    lookup logic of its own. Omitted origin/destination fall back to
+    `region_pack.default_origin`/`.default_destination` -- for the "med"
+    pack these are exactly `DEFAULT_ORIGIN`/`DEFAULT_DESTINATION`, so an
+    omitted field behaves identically to before this ticket for every
+    existing caller; a pack with no configured default raises rather than
+    silently falling back to the Med's endpoints."""
+    origin, destination = resolve_pack_endpoint(
+        region_pack,
+        latlon_from_model(body.origin) if body.origin is not None else None,
+        latlon_from_model(body.destination) if body.destination is not None else None,
+    )
     return PlanRequest(
         weather=weather,
         geography=geography,
         vessel=vessel_spec_from_model(body.vessel) if body.vessel is not None else default_vessel,
         pace=body.pace,
         comfort=body.comfort,
-        origin=latlon_from_model(body.origin) if body.origin is not None else DEFAULT_ORIGIN,
-        destination=(
-            latlon_from_model(body.destination)
-            if body.destination is not None
-            else DEFAULT_DESTINATION
-        ),
+        origin=origin,
+        destination=destination,
         origin_is_anchorage=body.origin_is_anchorage,
         destination_is_anchorage=body.destination_is_anchorage,
+        region_pack=region_pack,
         latest_arrival_h=body.latest_arrival_h,
         departure_t0_h=body.departure_t0_h,
         speeds_kn=tuple(body.speeds_kn) if body.speeds_kn is not None else None,

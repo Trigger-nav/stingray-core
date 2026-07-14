@@ -62,11 +62,12 @@ import heapq
 import math
 from dataclasses import dataclass
 
-from core.corridors import PORTS, REF_LAT_DEG, Corridor, corridor_east, corridor_west, offset_point
+from core.corridors import PORTS, REF_LAT_DEG, Corridor, offset_point
 from core.geography import Geography
 from core.isochrone import arrival_times_within, arrivals_within_horizon
-from core.lattice import LANE_TURN_RATE_NM, Lattice, build_lattice
+from core.lattice import Lattice, build_lattice
 from core.legs import evaluate_leg, leg_navigation
+from core.regionpack import MED_PACK, RegionPack, resolve_corridor
 from core.twin import VesselTwin, calm_power_kw
 from core.units import LatLon, distance_m, kn_to_ms, m_to_nm, ms_to_kn
 from core.vessel_spec import VesselSpec
@@ -183,6 +184,14 @@ class PlanRequest:
     destination: LatLon = DEFAULT_DESTINATION
     origin_is_anchorage: bool = False
     destination_is_anchorage: bool = False
+    # None -> `optimise()` resolves to `MED_PACK` (ticket R1). Deliberately
+    # not defaulted to `MED_PACK` directly: `core/` must not gain a file-
+    # I/O-shaped or working-directory-relative dependency in a dataclass
+    # default (`MED_PACK` itself is pure Python/no I/O, but the point is
+    # this field's *meaning* -- "unset" -- must resolve inside `optimise()`,
+    # not be baked into the type's own default, so a future pack source
+    # that does need I/O never gets tempted to default this field directly).
+    region_pack: RegionPack | None = None
     latest_arrival_h: float | None = None
     departure_t0_h: float = 0.0
     # None -> `optimise()` derives the grid from `vessel` via
@@ -220,7 +229,7 @@ class Alteration:
 @dataclass(frozen=True)
 class Candidate:
     corridor_name: str
-    side: str
+    side: str | None
     speed_kn: float
     active_engines: int
     track: tuple[LatLon, ...]
@@ -263,13 +272,25 @@ class PlanResult:
     diagnostics: tuple[PruneDiagnostic, ...] = ()
 
 
-def _route_signature(track: tuple[LatLon, ...]) -> str:
+def _route_signature(track: tuple[LatLon, ...]) -> str | None:
     """West/east of Corsica, derived from track geometry rather than a
-    fixed corridor name — works for any route the lattice search produces."""
+    fixed corridor name — works for any route the lattice search produces.
+
+    Returns `None` when no track point falls near Corsica at all -- any
+    pack/passage without a Corsica-like feature (e.g. a UK-pack passage,
+    ticket R1). **Found during R1 planning**: the old fallback compared
+    the *whole* track's mean longitude against `CORSICA_REF_LON`
+    regardless of whether any point was actually near Corsica, so it
+    unconditionally labelled every route "W" for any passage entirely
+    west of 9 deg E -- not a search-correctness bug (`_distinguishing_region`/
+    `_side_diversity_filter` already degrade to unconstrained correctly,
+    ticket 0.8 amendment 3), but a real, previously-undocumented labelling
+    bug. Callers must treat `None` as "no meaningful side label," not an
+    error -- same discipline those two functions already established."""
     lat_min, lat_max = CORSICA_LAT_BAND
     relevant = [p.lon_deg for p in track if lat_min <= p.lat_deg <= lat_max]
     if not relevant:
-        relevant = [p.lon_deg for p in track]
+        return None
     mean_lon = sum(relevant) / len(relevant)
     return "W" if mean_lon < CORSICA_REF_LON else "E"
 
@@ -322,12 +343,13 @@ def _build_leg_targets(
     stw_ms_per_leg: list[float],
     t0_h: float,
     weather: WeatherField,
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> tuple[LegTarget, ...]:
     targets = []
     t = t0_h
     for i in range(1, len(track)):
         stw_ms = stw_ms_per_leg[i - 1]
-        nav = leg_navigation(track[i - 1], track[i], stw_ms, t, weather)
+        nav = leg_navigation(track[i - 1], track[i], stw_ms, t, weather, ref_lat_deg)
         t += nav.duration_h
         targets.append(
             LegTarget(
@@ -367,7 +389,12 @@ def _build_alteration_list(leg_targets: tuple[LegTarget, ...]) -> tuple[Alterati
 
 
 def _heuristic_cost_eur(
-    current: LatLon, destination: LatLon, weights: Weights, vessel: VesselSpec, max_speed_kn: float
+    current: LatLon,
+    destination: LatLon,
+    weights: Weights,
+    vessel: VesselSpec,
+    max_speed_kn: float,
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> float:
     """Admissible lower bound on remaining cost-to-go: fastest possible
     time at max speed, costed at best-case (calm-water, optimal-SFOC) fuel
@@ -377,7 +404,7 @@ def _heuristic_cost_eur(
     but v1 currents are always zero)."""
     if max_speed_kn <= 0:
         return 0.0
-    remaining_nm = m_to_nm(distance_m(current, destination, REF_LAT_DEG))
+    remaining_nm = m_to_nm(distance_m(current, destination, ref_lat_deg))
     min_time_h = remaining_nm / max_speed_kn
     time_cost = weights.time_eur_per_min * min_time_h * 60
 
@@ -440,7 +467,12 @@ def _lattice_search(
         if not use_heuristic:
             return 0.0
         return _heuristic_cost_eur(
-            lattice.point(stage, lane), lattice.destination, weights, vessel, max_speed_kn
+            lattice.point(stage, lane),
+            lattice.destination,
+            weights,
+            vessel,
+            max_speed_kn,
+            lattice.ref_lat_deg,
         )
 
     heap: list[tuple[float, float, State]] = [(heuristic(0, 0), 0.0, start)]
@@ -475,6 +507,7 @@ def _lattice_search(
                         twin,
                         active_engines,
                         depth_exempt_points=depth_exempt_points,
+                        ref_lat_deg=lattice.ref_lat_deg,
                     )
                     if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
                         continue
@@ -592,9 +625,10 @@ def _lattice_route_result(
     )
     goal_node = nodes_by_state[goal_state]
     distance_nm = sum(
-        m_to_nm(distance_m(track[i - 1], track[i], REF_LAT_DEG)) for i in range(1, len(track))
+        m_to_nm(distance_m(track[i - 1], track[i], lattice.ref_lat_deg))
+        for i in range(1, len(track))
     )
-    leg_targets = _build_leg_targets(track, stw_ms_per_leg, t0_h, weather)
+    leg_targets = _build_leg_targets(track, stw_ms_per_leg, t0_h, weather, lattice.ref_lat_deg)
     return {
         "duration_h": goal_node.elapsed_h - t0_h,
         "fuel_kg": goal_node.fuel_kg,
@@ -629,6 +663,7 @@ def _dp_route(
     twin: VesselTwin,
     weights: Weights,
     t0_h: float,
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> dict | None:
     depth_exempt_points = (corridor.points[0], corridor.points[-1])
     states: dict[int, dict] = {
@@ -663,6 +698,7 @@ def _dp_route(
                     twin,
                     active_engines,
                     depth_exempt_points=depth_exempt_points,
+                    ref_lat_deg=ref_lat_deg,
                 )
                 if not leg.navigable or not leg.depth_ok:  # A5/0.8: hard prune, never costed
                     continue
@@ -692,11 +728,13 @@ def _dp_route(
             return None  # every option pruned at this speed/config -> infeasible
 
     end = states.get(0) or min(states.values(), key=lambda s: s["cost"])
-    track = tuple(offset_point(corridor, i, k) for i, k in enumerate(end["path"]))
+    track = tuple(offset_point(corridor, i, k, ref_lat_deg) for i, k in enumerate(end["path"]))
     distance_nm = sum(
-        m_to_nm(distance_m(track[i - 1], track[i], REF_LAT_DEG)) for i in range(1, len(track))
+        m_to_nm(distance_m(track[i - 1], track[i], ref_lat_deg)) for i in range(1, len(track))
     )
-    leg_targets = _build_leg_targets(track, [stw_ms] * (len(track) - 1), t0_h, weather)
+    leg_targets = _build_leg_targets(
+        track, [stw_ms] * (len(track) - 1), t0_h, weather, ref_lat_deg
+    )
     return {
         "duration_h": end["t"] - t0_h,
         "fuel_kg": end["fuel"],
@@ -796,7 +834,7 @@ def _baseline_route(
 def _candidate_from_result(
     result: dict,
     corridor_name: str,
-    side: str,
+    side: str | None,
     speed_kn: float,
     active_engines: int,
     latest_arrival_h: float | None,
@@ -854,6 +892,11 @@ def _speed_envelope_diagnostics(
 
 
 def optimise(request: PlanRequest) -> PlanResult:
+    # Ticket R1: an unset region_pack resolves to MED_PACK here, at
+    # call time -- not as PlanRequest's own dataclass default (see that
+    # field's docstring for why: core/ must not gain a working-directory-
+    # relative file dependency in a default).
+    pack = request.region_pack or MED_PACK
     twin = VesselTwin(request.vessel)
     mission_weights = weights_from_mission(request.pace, request.comfort)
     weights = combine_weights(mission_weights, request.vessel.wear_policy)
@@ -869,7 +912,16 @@ def optimise(request: PlanRequest) -> PlanResult:
     # geography=request.geography (ticket 0.8): without it, build_lattice
     # skips adaptive refinement entirely -- it has nothing to probe
     # navigability against.
-    lattice = build_lattice(request.origin, request.destination, geography=request.geography)
+    lattice = build_lattice(
+        request.origin,
+        request.destination,
+        geography=request.geography,
+        ref_lat_deg=pack.ref_lat_deg,
+        bbox=pack.bbox,
+        lane_turn_rate_nm=pack.lane_turn_rate_nm,
+        min_navigable_edge_fraction=pack.min_navigable_edge_fraction,
+        min_refinement_step_nm=pack.min_refinement_step_nm,
+    )
     horizon_h = (
         request.latest_arrival_h if request.latest_arrival_h is not None else DEFAULT_HORIZON_H
     )
@@ -937,59 +989,72 @@ def optimise(request: PlanRequest) -> PlanResult:
         # approach, nothing to do with routing around Corsica. `None`
         # (no distinguishing region for this origin/destination pair) is
         # a valid, unconstrained filter, not an error.
-        opposite_side = "W" if primary["side"] == "E" else "E"
-        opposite_filter = _side_diversity_filter(lattice, opposite_side)
-        secondary = _lattice_route_result(
-            lattice,
-            reachable,
-            request.weather,
-            request.geography,
-            twin,
-            request.vessel,
-            weights,
-            speeds_kn,
-            engine_configs,
-            request.departure_t0_h,
-            lane_filter=opposite_filter,
-        )
-        if secondary is not None and secondary["side"] != primary["side"]:
-            candidates_all.append(
-                _candidate_from_result(
-                    secondary,
-                    "Lattice route",
-                    secondary["side"],
-                    secondary["speed_kn"],
-                    secondary["active_engines"],
-                    request.latest_arrival_h,
+        #
+        # Ticket R1: gated on `primary["side"] is not None` -- a pack/
+        # passage with no Corsica-like distinguishing region at all (any
+        # region other than the Med, in this ticket) has no "side" concept
+        # to diversify against; searching for an "opposite side" of
+        # nothing isn't meaningful, and would previously always have
+        # spuriously computed opposite_side="E" (None == "E" is False)
+        # and reported a confusing "no feasible E-side route" diagnostic
+        # for a region where "side" was never a real concept. Always true
+        # for the Med (Antibes-Porto Cervo always crosses the Corsica
+        # band), so zero behaviour change there.
+        if primary["side"] is not None:
+            opposite_side = "W" if primary["side"] == "E" else "E"
+            opposite_filter = _side_diversity_filter(lattice, opposite_side)
+            secondary = _lattice_route_result(
+                lattice,
+                reachable,
+                request.weather,
+                request.geography,
+                twin,
+                request.vessel,
+                weights,
+                speeds_kn,
+                engine_configs,
+                request.departure_t0_h,
+                lane_filter=opposite_filter,
+            )
+            if secondary is not None and secondary["side"] != primary["side"]:
+                candidates_all.append(
+                    _candidate_from_result(
+                        secondary,
+                        "Lattice route",
+                        secondary["side"],
+                        secondary["speed_kn"],
+                        secondary["active_engines"],
+                        request.latest_arrival_h,
+                    )
                 )
-            )
-        else:
-            # The opposite-side lattice search either found nothing at all,
-            # or converged back onto the same side (both read as "no diverse
-            # option there") — previously silently dropped. Concrete case
-            # this exists for: Bonifacio Strait isn't threadable by the
-            # lattice at its current 5nm lane spacing (ROADMAP.md ticket
-            # 0.8 note), so every plan on this passage is currently E-side
-            # only, with nothing telling the caller why the W option never
-            # shows up.
-            missing_side = "W" if primary["side"] == "E" else "E"
-            step_range = (
-                f"{min(lattice.cross_track_step_nm):.2f}-{max(lattice.cross_track_step_nm):.2f}nm"
-                if len(set(lattice.cross_track_step_nm)) > 1
-                else f"{lattice.cross_track_step_nm[0]:.0f}nm"
-            )
-            diagnostics.append(
-                PruneDiagnostic(
-                    code="route_side_unreachable",
-                    message=(
-                        f"No feasible {missing_side}-side route found at the current lattice "
-                        f"resolution (cross-track step {step_range}, "
-                        f"+-{LANE_TURN_RATE_NM:.0f}nm/stage turn allowance) — see "
-                        f"ROADMAP.md ticket 0.8."
-                    ),
-                    side=missing_side,
+            else:
+                # The opposite-side lattice search either found nothing at
+                # all, or converged back onto the same side (both read as
+                # "no diverse option there") — previously silently dropped.
+                # Concrete case this exists for: Bonifacio Strait isn't
+                # threadable by the lattice at its current 5nm lane spacing
+                # (ROADMAP.md ticket 0.8 note), so every plan on this
+                # passage is currently E-side only, with nothing telling
+                # the caller why the W option never shows up.
+                missing_side = "W" if primary["side"] == "E" else "E"
+                step_range = (
+                    f"{min(lattice.cross_track_step_nm):.2f}-"
+                    f"{max(lattice.cross_track_step_nm):.2f}nm"
+                    if len(set(lattice.cross_track_step_nm)) > 1
+                    else f"{lattice.cross_track_step_nm[0]:.0f}nm"
                 )
-            )
+                diagnostics.append(
+                    PruneDiagnostic(
+                        code="route_side_unreachable",
+                        message=(
+                            f"No feasible {missing_side}-side route found at the current "
+                            f"lattice resolution (cross-track step {step_range}, "
+                            f"+-{pack.lane_turn_rate_nm:.0f}nm/stage turn allowance) — see "
+                            f"ROADMAP.md ticket 0.8."
+                        ),
+                        side=missing_side,
+                    )
+                )
 
     # --- Ticket 0.2: corridor DP grid — Med-specific hand-drawn waypoints
     # (B6/ROADMAP.md "Beyond Phase 2"), only meaningful for the exact
@@ -998,35 +1063,46 @@ def optimise(request: PlanRequest) -> PlanResult:
     # lattice search above found nothing) and as a cheap source of extra
     # diversity otherwise — for any other origin/destination, skipped
     # entirely; the lattice search + baseline are origin/destination-general
-    # on their own. ---
+    # on their own.
+    #
+    # Ticket R1: driven by `pack.legacy_corridors` rather than a hardcoded
+    # (corridor_west, corridor_east) tuple + DEFAULT_ORIGIN/DEFAULT_DESTINATION
+    # equality check -- the old equality check was already safe for a
+    # non-Med pack (it could never match), but this makes "corridors are
+    # Med-only" a designed property of the pack data, not an accident of
+    # non-matching defaults. Every pack except "med" ships
+    # legacy_corridors=(), so this loop body is structurally unreachable
+    # for any other pack. ---
     grid: list[dict] = []
-    if request.origin == DEFAULT_ORIGIN and request.destination == DEFAULT_DESTINATION:
-        for corridor_fn in (corridor_west, corridor_east):
-            corridor = corridor_fn()
-            for speed_kn in speeds_kn:
-                stw_ms = kn_to_ms(speed_kn)
-                for active_engines in engine_configs:
-                    result = _dp_route(
-                        corridor,
-                        stw_ms,
-                        speed_kn,
-                        active_engines,
-                        request.weather,
-                        request.geography,
-                        twin,
-                        weights,
-                        request.departure_t0_h,
-                    )
-                    if result is None:
-                        continue
-                    grid.append(
-                        {
-                            "corridor": corridor,
-                            "speed_kn": speed_kn,
-                            "active_engines": active_engines,
-                            "result": result,
-                        }
-                    )
+    for corridor_origin, corridor_destination, corridor_name in pack.legacy_corridors:
+        if not (request.origin == corridor_origin and request.destination == corridor_destination):
+            continue
+        corridor = resolve_corridor(corridor_name)()
+        for speed_kn in speeds_kn:
+            stw_ms = kn_to_ms(speed_kn)
+            for active_engines in engine_configs:
+                result = _dp_route(
+                    corridor,
+                    stw_ms,
+                    speed_kn,
+                    active_engines,
+                    request.weather,
+                    request.geography,
+                    twin,
+                    weights,
+                    request.departure_t0_h,
+                    pack.ref_lat_deg,
+                )
+                if result is None:
+                    continue
+                grid.append(
+                    {
+                        "corridor": corridor,
+                        "speed_kn": speed_kn,
+                        "active_engines": active_engines,
+                        "result": result,
+                    }
+                )
 
     best_by_key: dict[tuple[str, float], dict] = {}
     for item in grid:

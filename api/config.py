@@ -50,12 +50,26 @@ class Settings:
     # only ever reads this file (GET /v1/telemetry/status); capture/service.py
     # is the sole writer, in a separate OS process.
     telemetry_db_path: str = "data/telemetry/telemetry.sqlite3"
+    # Ticket R1: a separate SQLite file from telemetry_db_path above --
+    # different writer (api/favourites.py, the planner process itself, not
+    # capture/service.py), different lifecycle (per-vessel saved
+    # endpoints, not continuous sensor logging).
+    favourites_db_path: str = "data/favourites/favourites.sqlite3"
     # None -> RealGeography()'s own committed-data defaults
     # (core.geography.DEFAULT_COASTLINE_PATH etc.).
     coastline_path: str | None = None
     bathymetry_path: str | None = None
     nogo_path: str | None = None
     tss_path: str | None = None
+
+    # Ticket R1: None (default, every currently-deployed instance) ->
+    # api/state.py's load_region_packs() synthesizes a single implicit
+    # "med" pack from the flat coastline_path/etc. fields above, so no
+    # existing deployment needs a new file to keep working unchanged. Set
+    # to opt a deployment into multiple packs -- a YAML file listing every
+    # pack manifest path this instance should load (data/region_packs.yaml
+    # is the committed example: Med + UK South-West).
+    region_packs_path: str | None = None
 
     pool_size: int | None = None  # None -> os.cpu_count()
 
@@ -109,10 +123,14 @@ class Settings:
             telemetry_db_path=os.environ.get(
                 "STINGRAY_TELEMETRY_DB_PATH", "data/telemetry/telemetry.sqlite3"
             ),
+            favourites_db_path=os.environ.get(
+                "STINGRAY_FAVOURITES_DB_PATH", "data/favourites/favourites.sqlite3"
+            ),
             coastline_path=os.environ.get("STINGRAY_COASTLINE_PATH"),
             bathymetry_path=os.environ.get("STINGRAY_BATHYMETRY_PATH"),
             nogo_path=os.environ.get("STINGRAY_NOGO_PATH"),
             tss_path=os.environ.get("STINGRAY_TSS_PATH"),
+            region_packs_path=os.environ.get("STINGRAY_REGION_PACKS_PATH"),
             pool_size=int(pool_size_raw) if pool_size_raw is not None else None,
             auth_user=os.environ.get("STINGRAY_API_USER", ""),
             auth_password=os.environ.get("STINGRAY_API_PASSWORD", ""),

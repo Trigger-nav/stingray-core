@@ -1,0 +1,40 @@
+# Western Mediterranean region pack (ticket R1).
+#
+# This is the on-disk (API/deployment-layer) form of core/regionpack.py's
+# MED_PACK constant -- the two must stay byte-identical in value.
+# tests/test_regionpack.py's drift guard
+# (RegionPack.from_yaml(this file) == MED_PACK) enforces it; edit both
+# together, never just one.
+
+pack_id: med
+name: Western Mediterranean
+
+# lon_min, lat_min, lon_max, lat_max -- core.geography.OPERATING_AREA_BBOX
+bbox: [6.7, 40.75, 10.15, 44.0]
+ref_lat_deg: 42.3
+
+coastline_path: data/geography/coastline_western_med.json
+bathymetry_path: data/geography/bathymetry_western_med.npz
+nogo_path: data/geography/nogo_western_med.json
+tss_path: data/geography/tss_western_med.json
+weather_npz_path: data/weather/ecmwf_western_med.npz
+
+ports:
+  antibes: [43.55, 7.17]
+  portocervo: [41.13, 9.55]
+default_origin: [43.55, 7.17]
+default_destination: [41.13, 9.55]
+
+# Bonifacio/CLAUDE.md-tuned lattice search knobs -- core.lattice's own
+# defaults, restated here as pack data per R1's engineering rule.
+lane_turn_rate_nm: 15.0
+min_navigable_edge_fraction: 0.75
+min_refinement_step_nm: 0.5
+
+legacy_corridors:
+  - origin: [43.55, 7.17]
+    destination: [41.13, 9.55]
+    corridor: corridor_west
+  - origin: [43.55, 7.17]
+    destination: [41.13, 9.55]
+    corridor: corridor_east

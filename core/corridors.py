@@ -7,6 +7,7 @@ fallback path per the roadmap)."""
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from core.units import EARTH_NM_PER_DEG_LAT, LatLon, interpolate_point
@@ -100,6 +101,18 @@ def corridor_east() -> Corridor:
         max_offset_steps=max_offset,
         offset_nm=5.0,
     )
+
+
+# Region-pack manifests (ticket R1) are YAML, which can't hold a function
+# literal -- a pack's `legacy_corridors` stores corridor *names*, resolved
+# through this registry at `RegionPack.from_yaml` load time (raising a
+# clear `ValueError` on an unknown name there, not a mysterious failure
+# later). Only ever grows for the Med pack in practice -- R1's own scope
+# demotes hand-drawn corridors to Med-only legacy.
+CORRIDOR_REGISTRY: dict[str, Callable[[], Corridor]] = {
+    "corridor_west": corridor_west,
+    "corridor_east": corridor_east,
+}
 
 
 def offset_point(corridor: Corridor, i: int, k: int, ref_lat_deg: float = REF_LAT_DEG) -> LatLon:

@@ -22,6 +22,7 @@ import urllib.error
 import urllib.request
 
 from api.config import Settings
+from core.regionpack import RegionPack
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +34,26 @@ def _basic_auth_header(config: Settings) -> dict[str, str]:
     return {"Authorization": f"Basic {token}"}
 
 
-def sync_once_blocking(config: Settings, last_modified: str | None) -> str | None:
+def sync_once_blocking(
+    config: Settings, pack_id: str, weather_npz_path: str, last_modified: str | None
+) -> str | None:
     """Blocking HTTP fetch -- call via `asyncio.to_thread`, never directly
     on the event loop. Returns the new `Last-Modified` header value on a
     successful download, or `None` if nothing changed (304) or the fetch
     failed. Failure is logged, never raised -- this is opportunistic,
     matching PRODUCT_SPEC.md §7's "intermittent, expensive satcom"
     connectivity assumption: a missed sync just means planning continues
-    on last-synced weather until the next attempt."""
+    on last-synced weather until the next attempt.
+
+    `pack_id`/`weather_npz_path` (ticket R1): this vessel pulls only the
+    pack(s) its own `region_packs` configures it to care about -- a
+    UK-only bridge PC never fetches the Med pack's npz just because the
+    cloud instance happens to also serve it. Each pack keeps its own
+    independent conditional-HTTP state (`last_modified`), so one pack's
+    fetch failure/staleness never blocks another's."""
     if not config.cloud_weather_url:
         return None
-    url = config.cloud_weather_url.rstrip("/") + "/v1/weather/latest.npz"
+    url = config.cloud_weather_url.rstrip("/") + f"/v1/weather/latest.npz?pack={pack_id}"
     headers = _basic_auth_header(config)
     if last_modified:
         headers["If-Modified-Since"] = last_modified
@@ -55,29 +65,34 @@ def sync_once_blocking(config: Settings, last_modified: str | None) -> str | Non
     except urllib.error.HTTPError as exc:
         if exc.code == 304:
             return None
-        logger.warning("weather sync fetch failed: HTTP %d", exc.code)
+        logger.warning("weather sync fetch failed for pack %r: HTTP %d", pack_id, exc.code)
         return None
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
-        logger.warning("weather sync fetch failed: %s", exc)
+        logger.warning("weather sync fetch failed for pack %r: %s", pack_id, exc)
         return None
 
     # Atomic write -- api/state.py's hot-swap watcher only ever sees a
     # complete file, never a partial one mid-download.
-    tmp_path = config.weather_npz_path + ".tmp"
-    os.makedirs(os.path.dirname(config.weather_npz_path) or ".", exist_ok=True)
+    tmp_path = weather_npz_path + ".tmp"
+    os.makedirs(os.path.dirname(weather_npz_path) or ".", exist_ok=True)
     with open(tmp_path, "wb") as f:
         f.write(data)
-    os.replace(tmp_path, config.weather_npz_path)
+    os.replace(tmp_path, weather_npz_path)
     return new_last_modified
 
 
 class WeatherSyncLoop:
     """Vessel-role-only background task (api/main.py's lifespan only
-    starts this when `config.role == "vessel"`)."""
+    starts this when `config.role == "vessel"`). Ticket R1: syncs every
+    pack in `region_packs` (this instance's own configured packs, from
+    `api.state.load_region_packs` -- typically just one for a
+    single-region bridge PC) independently, each with its own
+    conditional-HTTP state."""
 
-    def __init__(self, config: Settings) -> None:
+    def __init__(self, config: Settings, region_packs: dict[str, RegionPack]) -> None:
         self._config = config
-        self._last_modified: str | None = None
+        self._region_packs = region_packs
+        self._last_modified: dict[str, str | None] = dict.fromkeys(region_packs)
         self._task: asyncio.Task | None = None
 
     async def start(self) -> None:
@@ -94,12 +109,22 @@ class WeatherSyncLoop:
     async def _loop(self) -> None:
         while True:
             await asyncio.sleep(self._config.weather_sync_interval_s)
-            try:
-                new_last_modified = await asyncio.to_thread(
-                    sync_once_blocking, self._config, self._last_modified
-                )
-                if new_last_modified:
-                    self._last_modified = new_last_modified
-                    logger.info("weather sync: pulled a fresh npz from the cloud instance")
-            except Exception:
-                logger.exception("weather sync loop iteration failed, will retry")
+            for pack_id, pack in self._region_packs.items():
+                try:
+                    new_last_modified = await asyncio.to_thread(
+                        sync_once_blocking,
+                        self._config,
+                        pack_id,
+                        pack.weather_npz_path,
+                        self._last_modified[pack_id],
+                    )
+                    if new_last_modified:
+                        self._last_modified[pack_id] = new_last_modified
+                        logger.info(
+                            "weather sync: pulled a fresh npz for pack %r from the cloud instance",
+                            pack_id,
+                        )
+                except Exception:
+                    logger.exception(
+                        "weather sync loop iteration failed for pack %r, will retry", pack_id
+                    )

@@ -44,6 +44,7 @@ def _short_payload(**overrides) -> PlanJobPayload:
     defaults = dict(
         pace=50.0,
         comfort=50.0,
+        pack_id="med",
         origin=SHORT_ORIGIN,
         destination=SHORT_DESTINATION,
         origin_is_anchorage=False,

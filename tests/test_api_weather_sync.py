@@ -19,6 +19,7 @@ import shutil
 import threading
 import time
 from email.utils import formatdate
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -32,7 +33,9 @@ class _FakeCloudHandler(http.server.BaseHTTPRequestHandler):
     last_modified = formatdate(timeval=1_700_000_000, usegmt=True)
 
     def do_GET(self):  # noqa: N802 -- stdlib method name
-        if self.path != "/v1/weather/latest.npz":
+        # ticket R1: real requests carry a ?pack=... query string --
+        # compare the bare path only.
+        if urlsplit(self.path).path != "/v1/weather/latest.npz":
             self.send_response(404)
             self.end_headers()
             return
@@ -64,11 +67,8 @@ def fake_cloud_server():
 def test_sync_once_downloads_and_writes_atomically(tmp_path, fake_cloud_server):
     port = fake_cloud_server.server_address[1]
     npz_path = tmp_path / "weather.npz"
-    config = Settings(
-        weather_npz_path=str(npz_path),
-        cloud_weather_url=f"http://127.0.0.1:{port}",
-    )
-    last_modified = sync_once_blocking(config, last_modified=None)
+    config = Settings(cloud_weather_url=f"http://127.0.0.1:{port}")
+    last_modified = sync_once_blocking(config, "med", str(npz_path), last_modified=None)
     assert last_modified == _FakeCloudHandler.last_modified
     assert npz_path.read_bytes() == _FakeCloudHandler.payload
     assert not (tmp_path / "weather.npz.tmp").exists()
@@ -77,25 +77,20 @@ def test_sync_once_downloads_and_writes_atomically(tmp_path, fake_cloud_server):
 def test_sync_once_conditional_get_is_a_no_op_when_unchanged(tmp_path, fake_cloud_server):
     port = fake_cloud_server.server_address[1]
     npz_path = tmp_path / "weather.npz"
-    config = Settings(
-        weather_npz_path=str(npz_path),
-        cloud_weather_url=f"http://127.0.0.1:{port}",
-    )
-    first = sync_once_blocking(config, last_modified=None)
+    config = Settings(cloud_weather_url=f"http://127.0.0.1:{port}")
+    first = sync_once_blocking(config, "med", str(npz_path), last_modified=None)
     npz_path.write_bytes(b"should not be overwritten")
-    second = sync_once_blocking(config, last_modified=first)
+    second = sync_once_blocking(config, "med", str(npz_path), last_modified=first)
     assert second is None
     assert npz_path.read_bytes() == b"should not be overwritten"
 
 
 def test_sync_once_returns_none_and_does_not_raise_when_unreachable(tmp_path):
-    config = Settings(
-        weather_npz_path=str(tmp_path / "weather.npz"),
-        cloud_weather_url="http://127.0.0.1:1",  # nothing listens here
-    )
-    result = sync_once_blocking(config, last_modified=None)
+    config = Settings(cloud_weather_url="http://127.0.0.1:1")  # nothing listens here
+    npz_path = tmp_path / "weather.npz"
+    result = sync_once_blocking(config, "med", str(npz_path), last_modified=None)
     assert result is None
-    assert not (tmp_path / "weather.npz").exists()
+    assert not npz_path.exists()
 
 
 class _SlowShutdownExecutorStub:
@@ -121,7 +116,8 @@ def test_hot_swap_does_not_block_the_event_loop_during_old_pool_shutdown(tmp_pat
         try:
             slow_stub = _SlowShutdownExecutorStub(delay_s=1.5)
             state.executor_holder.executor = slow_stub
-            state._last_weather_mtime = -1.0  # force "changed" regardless of real mtime
+            # force "changed" regardless of real mtime
+            state._last_weather_mtimes = dict.fromkeys(state.region_packs, -1.0)
 
             t0 = time.time()
             swap_task = asyncio.create_task(state._check_and_swap())

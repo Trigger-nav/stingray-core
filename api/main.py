@@ -49,7 +49,9 @@ def create_app(config: Settings | None = None) -> FastAPI:
 
         await app_state.start_weather_watch()
         await job_store.start_eviction_loop()
-        weather_sync = WeatherSyncLoop(config) if config.role == "vessel" else None
+        weather_sync = (
+            WeatherSyncLoop(config, app_state.region_packs) if config.role == "vessel" else None
+        )
         if weather_sync is not None:
             await weather_sync.start()
 

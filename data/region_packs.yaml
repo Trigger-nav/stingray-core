@@ -1,0 +1,8 @@
+# Multi-pack deployment manifest example (ticket R1). Loaded when
+# STINGRAY_REGION_PACKS_PATH points here -- lists every region pack a
+# deployment should serve. Not read by anything when
+# STINGRAY_REGION_PACKS_PATH is unset (every existing single-pack
+# deployment, api.state.load_region_packs' legacy fallback).
+packs:
+  - data/region_packs/med.yaml
+  - data/region_packs/uk_sw.yaml

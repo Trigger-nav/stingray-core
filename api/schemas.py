@@ -110,6 +110,14 @@ class PlanRequestIn(BaseModel):
 
     pace: float
     comfort: float
+    # Ticket R1: which RegionPack this request targets -- resolved to a
+    # core.regionpack.RegionPack in api/convert.py (a string key, not the
+    # pack object itself, since PlanRequestIn is a client-facing wire
+    # schema; core.optimiser.PlanRequest's matching field is `region_pack`,
+    # not `pack_id` -- see tests/test_api_schema_parity.py's PAIRS entry
+    # for this pair). Default "med" preserves exact current behaviour for
+    # every existing caller (the hosted demo's fixed passage).
+    pack_id: str = "med"
     origin: LatLonModel | None = None
     destination: LatLonModel | None = None
     origin_is_anchorage: bool = False
@@ -140,7 +148,10 @@ class AlterationModel(BaseModel):
 
 class CandidateModel(BaseModel):
     corridor_name: str
-    side: str
+    # str | None (ticket R1): core._route_signature returns None for a
+    # pack/passage with no Corsica-like distinguishing region -- see
+    # core/optimiser.py's docstring.
+    side: str | None
     speed_kn: float
     active_engines: int
     track: list[LatLonModel]
@@ -226,6 +237,30 @@ class TelemetryStatusOut(BaseModel):
     sensor_tier: str | None
     sample_count: int
     gap_seconds: float | None
+
+
+class FavouriteIn(BaseModel):
+    """Ticket R1: POST /v1/favourites body. vessel_id is a query param
+    (see api/routes.py), not part of this body -- the identity scoping a
+    favourite belongs to is the same shape auth would eventually use, not
+    request-payload data the client picks per-call."""
+
+    name: str
+    lat_deg: float
+    lon_deg: float
+    is_anchorage: bool = False
+    pack_id: str = "med"
+
+
+class FavouriteOut(BaseModel):
+    id: str
+    vessel_id: str
+    name: str
+    lat_deg: float
+    lon_deg: float
+    is_anchorage: bool
+    pack_id: str
+    created_at: float
 
 
 class WeatherFieldOut(BaseModel):

@@ -42,6 +42,7 @@ def _best_feasible_duration_h(
     speeds_kn: tuple[float, ...],
     engine_configs: tuple[int, ...],
     depth_exempt_points: tuple[LatLon, ...],
+    ref_lat_deg: float,
 ) -> float | None:
     """Fastest feasible leg duration trying every (speed, engine-config)
     combination — engine count doesn't change duration directly, but *does*
@@ -62,6 +63,7 @@ def _best_feasible_duration_h(
                 twin,
                 active_engines,
                 depth_exempt_points=depth_exempt_points,
+                ref_lat_deg=ref_lat_deg,
             )
             if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
                 continue
@@ -125,7 +127,16 @@ def arrival_times_within(
         for next_lane in lattice.turn_range(stage, lane):
             p, q = lattice.point(stage, lane), lattice.point(stage + 1, next_lane)
             best_leg_duration = _best_feasible_duration_h(
-                p, q, t, weather, geography, twin, speeds_kn, engine_configs, depth_exempt_points
+                p,
+                q,
+                t,
+                weather,
+                geography,
+                twin,
+                speeds_kn,
+                engine_configs,
+                depth_exempt_points,
+                lattice.ref_lat_deg,
             )
             if best_leg_duration is None:
                 continue
@@ -211,7 +222,16 @@ def time_optimal_route(
         for next_lane in lattice.turn_range(stage, lane):
             p, q = lattice.point(stage, lane), lattice.point(stage + 1, next_lane)
             best_leg_duration = _best_feasible_duration_h(
-                p, q, t, weather, geography, twin, speeds_kn, engine_configs, depth_exempt_points
+                p,
+                q,
+                t,
+                weather,
+                geography,
+                twin,
+                speeds_kn,
+                engine_configs,
+                depth_exempt_points,
+                lattice.ref_lat_deg,
             )
             if best_leg_duration is None:
                 continue

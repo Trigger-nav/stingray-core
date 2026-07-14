@@ -30,3 +30,12 @@ data/weather/*.npz
 # vessel data is ticket B6's job, never committed here; keep the README
 # itself tracked.
 data/historical/*/
+
+# ticket R1: same staleness reasoning as data/weather/*.npz above,
+# extended to any region pack's own weather npz
+# (data/region_packs/<pack>/weather_*.npz) -- geography (GEBCO/GSHHG) and
+# ports are static and stay committed per-pack; weather doesn't.
+# tests/test_uk_sw_pack_acceptance.py skips (doesn't fail) when this file
+# is absent -- run docs/region-pack-runbook.md's weather step to
+# regenerate it locally.
+data/region_packs/*/weather_*.npz

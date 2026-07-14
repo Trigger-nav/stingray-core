@@ -311,6 +311,26 @@ self-heal past a temporary "cycle not yet published" 404 by falling back
 to the previous cycle, logging each fallback step — check
 `/var/log/stingray-fetch-*.log` if you ever want to confirm one fired.
 
+**Multi-pack deployments (ticket R1):** the two crontab lines above are
+the single-pack (Med-only) form -- correct for every deployment today.
+Once `STINGRAY_REGION_PACKS_PATH` is set (`docs/region-pack-runbook.md`),
+replace them with `ingest.fetch_all_packs`, a thin wrapper that loops the
+same two fetchers over every pack listed in that manifest instead of one
+hardcoded bbox:
+
+```
+0 * * * *   cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_all_packs --packs-manifest /opt/stingray/data/region_packs.yaml --source nomads >> /var/log/stingray-fetch-nomads.log 2>&1
+5 */3 * * * cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_all_packs --packs-manifest /opt/stingray/data/region_packs.yaml --source ecmwf >> /var/log/stingray-fetch-ecmwf.log 2>&1
+```
+
+The packs manifest is cron's single source of truth for which bboxes get
+fetched -- add a pack to `region_packs.yaml` and both cron lines pick it
+up automatically, no crontab edit needed. `GET /v1/weather/latest.npz`
+gains a matching `?pack=<id>` query param (default `"med"`) for the
+vessel-role pull side (`api/weather_sync.py`, which itself only ever
+pulls the pack(s) *that vessel's own* `region_packs.yaml` configures it
+to care about, not every pack the cloud role happens to serve).
+
 ### 8. TLS (Caddy)
 
 ```

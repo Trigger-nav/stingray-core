@@ -12,6 +12,15 @@
 #
 # 0 * * * *    fetch every hour on the hour
 # 5 */3 * * *  fetch every 3 hours, 5 minutes past
+#
+# Ticket R1: this is the single-pack (Med-only) form, correct for every
+# deployment today. Once STINGRAY_REGION_PACKS_PATH is set (multiple
+# configured packs, e.g. Med + UK South-West -- see
+# docs/region-pack-runbook.md), replace both lines below with
+# `ingest.fetch_all_packs --packs-manifest <path> --source nomads|ecmwf`
+# instead -- one thin wrapper looping the same two fetchers over every
+# pack the manifest lists, so cron never needs editing again when a pack
+# is added. See deploy/README.md's "Multi-pack deployments" note.
 
 0 * * * *   cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_nomads --out /opt/stingray/data/weather/nomads_western_med.npz >> /var/log/stingray-fetch-nomads.log 2>&1
 5 */3 * * * cd /opt/stingray-ingest && /opt/stingray-ingest/venv/bin/python3 -m ingest.fetch_grib_ecmwf --out /opt/stingray/data/weather/ecmwf_western_med.npz >> /var/log/stingray-fetch-ecmwf.log 2>&1

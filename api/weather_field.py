@@ -37,15 +37,20 @@ def quantize_hour(h: float) -> float:
     return round(h)
 
 
-def compute_weather_field_etag(weather: WeatherField, valid_time_h: float) -> str:
-    """Depends only on (weather cycle/fetch provenance, quantized hour,
-    downsample resolution) -- never recomputed unless one of those
-    actually changes, so a scrub gesture revisiting the same hour, or a
-    second browser tab, gets a cheap 304 instead of re-serializing the
-    same ~1000-point grid."""
+def compute_weather_field_etag(weather: WeatherField, valid_time_h: float, pack_id: str) -> str:
+    """Depends on (weather cycle/fetch provenance, quantized hour,
+    downsample resolution, `pack_id`) -- never recomputed unless one of
+    those actually changes, so a scrub gesture revisiting the same hour,
+    or a second browser tab, gets a cheap 304 instead of re-serializing
+    the same ~1000-point grid. `pack_id` (ticket R1): without it, two
+    packs' fields can share an identical (cycle, fetched, valid_time_h)
+    triple (e.g. both fetched by the same cron run) and a browser that
+    already cached one pack's response would get served a 304 for the
+    other pack's request -- silently serving stale/wrong-region data with
+    no error anywhere."""
     cycle = getattr(weather, "cycle", None) or ""
     fetched = getattr(weather, "fetched", None) or ""
-    key = f"{cycle}|{fetched}|{valid_time_h}|{FIELD_GRID_NLAT}x{FIELD_GRID_NLON}"
+    key = f"{pack_id}|{cycle}|{fetched}|{valid_time_h}|{FIELD_GRID_NLAT}x{FIELD_GRID_NLON}"
     digest = hashlib.sha256(key.encode()).hexdigest()[:16]
     return f'"{digest}"'
 
@@ -54,8 +59,12 @@ def _none_if_nan(x: float) -> float | None:
     return None if math.isnan(x) else x
 
 
-def build_weather_field(weather: WeatherField, valid_time_h: float) -> WeatherFieldOut:
-    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+def build_weather_field(
+    weather: WeatherField,
+    valid_time_h: float,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+) -> WeatherFieldOut:
+    lon_min, lat_min, lon_max, lat_max = bbox
     dlat = (lat_max - lat_min) / (FIELD_GRID_NLAT - 1)
     dlon = (lon_max - lon_min) / (FIELD_GRID_NLON - 1)
 

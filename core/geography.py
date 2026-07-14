@@ -31,11 +31,18 @@ from __future__ import annotations
 import json
 import math
 from pathlib import Path
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 
 from core.gridding import bilinear, grid_fracs, nearest
+
+if TYPE_CHECKING:
+    # TYPE_CHECKING-only: core/regionpack.py imports OPERATING_AREA_BBOX/
+    # DEFAULT_*_PATH from this module, so a runtime import here would be
+    # circular. `from __future__ import annotations` (below) means this
+    # type hint never needs RegionPack to actually exist at import time.
+    from core.regionpack import RegionPack
 
 # Western-Med corridor bbox real data is cropped to: lon_min, lat_min,
 # lon_max, lat_max. Shared with ingest/fetch_gshhg.py and
@@ -358,6 +365,48 @@ class RealGeography:
                 f"({lat_deg}, {lon_deg}) is outside this RealGeography instance's "
                 f"loaded bounds (lat {lat_min}..{lat_max}, lon {lon_min}..{lon_max}) — "
                 "no real GSHHG/GEBCO data covers this point"
+            )
+
+    @classmethod
+    def from_pack(cls, pack: RegionPack) -> RealGeography:
+        """Construct from a region pack's paths (ticket R1), then verify
+        the loaded grid actually covers `pack.bbox` -- a manifest whose
+        `bbox` doesn't match what its `bathymetry_path`/`coastline_path`
+        files actually cover is a real, plausible authoring mistake (e.g.
+        a copy-paste error building a new pack's YAML), and without this
+        check it would fail silently rather than loudly: `core/lattice.py`
+        clips the search lattice to `pack.bbox` while this instance's own
+        point queries trust the loaded grid instead, and a mismatch
+        between the two doesn't raise anywhere -- it just prunes the
+        lattice to the wrong area, producing an opaque "no feasible route
+        found" with no hint why. See `_check_pack_bounds`."""
+        geo = cls(pack.coastline_path, pack.bathymetry_path, pack.nogo_path, pack.tss_path)
+        geo._check_pack_bounds(pack.bbox)
+        return geo
+
+    def _check_pack_bounds(self, pack_bbox: tuple[float, float, float, float]) -> None:
+        """One-time manifest sanity check at `from_pack` construction time
+        (unlike `_check_in_bounds`, which runs on every point query) --
+        asserts this instance's own derived bounds (same edge/half-grid-
+        step logic `_check_in_bounds` uses) match `pack_bbox` within half
+        a grid step in each direction."""
+        lon_min, lat_min, lon_max, lat_max = pack_bbox
+        lat_edge = self._lat0 + self._dlat * (self._nlat - 1)
+        lon_edge = self._lon0 + self._dlon * (self._nlon - 1)
+        half_dlat, half_dlon = abs(self._dlat) / 2, abs(self._dlon) / 2
+        grid_lat_min, grid_lat_max = sorted((self._lat0 - half_dlat, lat_edge + half_dlat))
+        grid_lon_min, grid_lon_max = sorted((self._lon0 - half_dlon, lon_edge + half_dlon))
+        if not (
+            abs(grid_lat_min - lat_min) <= half_dlat
+            and abs(grid_lat_max - lat_max) <= half_dlat
+            and abs(grid_lon_min - lon_min) <= half_dlon
+            and abs(grid_lon_max - lon_max) <= half_dlon
+        ):
+            raise ValueError(
+                f"region pack bbox {pack_bbox} does not match the loaded grid's own "
+                f"coverage (lat {grid_lat_min:.4f}..{grid_lat_max:.4f}, "
+                f"lon {grid_lon_min:.4f}..{grid_lon_max:.4f}) -- this pack's manifest "
+                "likely points at the wrong geography files, or its bbox field is stale"
             )
 
     def is_land(self, lat_deg: float, lon_deg: float) -> bool:

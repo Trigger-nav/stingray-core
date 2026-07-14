@@ -91,24 +91,39 @@ class Lattice:
     max_lane_per_stage: tuple[int, ...]
     cross_track_step_nm: tuple[float, ...]
     refinement_diagnostics: tuple[RefinementDiagnostic, ...] = field(default_factory=tuple)
+    # Ticket R1: carried on the built Lattice itself (rather than threaded
+    # as a parameter through every isochrone.py/optimiser.py call site)
+    # so .point()/.turn_range() stay self-contained -- the pack that built
+    # this lattice is what determines these, and every caller already has
+    # the Lattice object in hand.
+    ref_lat_deg: float = REF_LAT_DEG
+    lane_turn_rate_nm: float = LANE_TURN_RATE_NM
 
     @property
     def n_stages(self) -> int:
         return len(self.stage_centres)
 
     def point(self, stage: int, lane: int) -> LatLon:
-        return _offset_point(self.stage_centres, stage, lane, self.cross_track_step_nm[stage])
+        return _offset_point(
+            self.stage_centres, stage, lane, self.cross_track_step_nm[stage], self.ref_lat_deg
+        )
 
     def turn_range(self, from_stage: int, from_lane: int) -> range:
         """Lane-index range reachable at `from_stage + 1` from `from_lane`,
         given the fixed *physical* lateral turn allowance
-        `LANE_TURN_RATE_NM`. The one place this computation happens —
+        `self.lane_turn_rate_nm`. The one place this computation happens —
         `core/isochrone.py` and `core/optimiser.py` both call this rather
         than each re-deriving it (they're meant to be identical, same
         precedent as `core/legs.py`'s shared hard-constraint semantics).
         See `_turn_range` for why it's physical-position-based, not
         lane-index arithmetic."""
-        return _turn_range(self.cross_track_step_nm, self.max_lane_per_stage, from_stage, from_lane)
+        return _turn_range(
+            self.cross_track_step_nm,
+            self.max_lane_per_stage,
+            from_stage,
+            from_lane,
+            self.lane_turn_rate_nm,
+        )
 
 
 def _turn_range(
@@ -116,6 +131,7 @@ def _turn_range(
     max_lane_per_stage: tuple[int, ...] | list[int],
     from_stage: int,
     from_lane: int,
+    lane_turn_rate_nm: float = LANE_TURN_RATE_NM,
 ) -> range:
     """Lane-index range at `from_stage + 1` within `LANE_TURN_RATE_NM` of
     `from_lane`, computed in physical lateral position (`lane * that
@@ -140,8 +156,8 @@ def _turn_range(
     to_step = steps[to_stage]
     from_physical_nm = from_lane * from_step
     next_max_lane = max_lane_per_stage[to_stage]
-    lo = max(-next_max_lane, math.ceil((from_physical_nm - LANE_TURN_RATE_NM) / to_step))
-    hi = min(next_max_lane, math.floor((from_physical_nm + LANE_TURN_RATE_NM) / to_step))
+    lo = max(-next_max_lane, math.ceil((from_physical_nm - lane_turn_rate_nm) / to_step))
+    hi = min(next_max_lane, math.floor((from_physical_nm + lane_turn_rate_nm) / to_step))
     return range(lo, hi + 1)
 
 
@@ -166,8 +182,13 @@ def _offset_point(
     )
 
 
-def _within_bbox_with_margin(lat_deg: float, lon_deg: float, margin_deg: float) -> bool:
-    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+def _within_bbox_with_margin(
+    lat_deg: float,
+    lon_deg: float,
+    margin_deg: float,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+) -> bool:
+    lon_min, lat_min, lon_max, lat_max = bbox
     return (
         lat_min + margin_deg <= lat_deg <= lat_max - margin_deg
         and lon_min + margin_deg <= lon_deg <= lon_max - margin_deg
@@ -180,15 +201,17 @@ def _stage_max_lane(
     step_nm: float,
     cross_track_half_width_nm: float,
     margin_deg: float,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> int:
     requested_max_lane = max(1, round(cross_track_half_width_nm / step_nm))
     stage_max = 0
     for lane in range(1, requested_max_lane + 1):
-        p_pos = _offset_point(stage_centres, stage, lane, step_nm)
-        p_neg = _offset_point(stage_centres, stage, -lane, step_nm)
+        p_pos = _offset_point(stage_centres, stage, lane, step_nm, ref_lat_deg)
+        p_neg = _offset_point(stage_centres, stage, -lane, step_nm, ref_lat_deg)
         if not (
-            _within_bbox_with_margin(p_pos.lat_deg, p_pos.lon_deg, margin_deg)
-            and _within_bbox_with_margin(p_neg.lat_deg, p_neg.lon_deg, margin_deg)
+            _within_bbox_with_margin(p_pos.lat_deg, p_pos.lon_deg, margin_deg, bbox)
+            and _within_bbox_with_margin(p_neg.lat_deg, p_neg.lon_deg, margin_deg, bbox)
         ):
             break
         stage_max = lane
@@ -201,6 +224,8 @@ def _outgoing_edge_navigable_fraction(
     max_lane_per_stage: list[int],
     stage: int,
     geography: Geography,
+    ref_lat_deg: float = REF_LAT_DEG,
+    lane_turn_rate_nm: float = LANE_TURN_RATE_NM,
 ) -> float:
     """Fraction of (lane at `stage`) x (turn-reachable lane at `stage+1`)
     pairs that are actually leg-navigable — the same edge-level signal
@@ -219,15 +244,19 @@ def _outgoing_edge_navigable_fraction(
         total = 0
         navigable = 0
         for lane in lanes:
-            p = _offset_point(stage_centres, stage, lane, steps[stage])
+            p = _offset_point(stage_centres, stage, lane, steps[stage], ref_lat_deg)
             if not geography.is_navigable(p.lat_deg, p.lon_deg):
                 continue
-            for next_lane in _turn_range(steps, max_lane_per_stage, stage, lane):
-                q = _offset_point(stage_centres, stage + 1, next_lane, steps[stage + 1])
+            for next_lane in _turn_range(
+                steps, max_lane_per_stage, stage, lane, lane_turn_rate_nm
+            ):
+                q = _offset_point(
+                    stage_centres, stage + 1, next_lane, steps[stage + 1], ref_lat_deg
+                )
                 if not geography.is_navigable(q.lat_deg, q.lon_deg):
                     continue
                 total += 1
-                if _navigable_along_leg(p, q, geography):
+                if _navigable_along_leg(p, q, geography, ref_lat_deg):
                     navigable += 1
         # No navigable starting lane on this half at all -> refinement
         # can't help (finer sampling of dry land is still dry land); that
@@ -252,6 +281,9 @@ def build_lattice(
     min_navigable_edge_fraction: float = DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
     max_refinement_passes: int = DEFAULT_MAX_REFINEMENT_PASSES,
     min_refinement_step_nm: float = DEFAULT_MIN_REFINEMENT_STEP_NM,
+    ref_lat_deg: float = REF_LAT_DEG,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+    lane_turn_rate_nm: float = LANE_TURN_RATE_NM,
 ) -> Lattice:
     """Build the open lattice, clipping the requested half-width down to
     whatever actually stays inside `OPERATING_AREA_BBOX` (with margin) at
@@ -274,7 +306,7 @@ def build_lattice(
     — the search itself already handles a genuinely-impassable region by
     finding no path there, same as it always has for any hazard.
     """
-    total_nm = m_to_nm(distance_m(origin, destination, REF_LAT_DEG))
+    total_nm = m_to_nm(distance_m(origin, destination, ref_lat_deg))
     n_stages = max(2, round(total_nm / along_track_step_nm) + 1)
     stage_centres = tuple(
         interpolate_point(origin, destination, i / (n_stages - 1)) for i in range(n_stages)
@@ -283,7 +315,9 @@ def build_lattice(
     margin_deg = BBOX_MARGIN_NM / EARTH_NM_PER_DEG_LAT
     steps = [cross_track_step_nm] * n_stages
     max_lane_per_stage = [
-        _stage_max_lane(stage_centres, i, steps[i], cross_track_half_width_nm, margin_deg)
+        _stage_max_lane(
+            stage_centres, i, steps[i], cross_track_half_width_nm, margin_deg, bbox, ref_lat_deg
+        )
         for i in range(n_stages)
     ]
 
@@ -292,7 +326,13 @@ def build_lattice(
         for stage in range(n_stages - 1):
             passes = 0
             frac = _outgoing_edge_navigable_fraction(
-                stage_centres, steps, max_lane_per_stage, stage, geography
+                stage_centres,
+                steps,
+                max_lane_per_stage,
+                stage,
+                geography,
+                ref_lat_deg,
+                lane_turn_rate_nm,
             )
             while (
                 frac < min_navigable_edge_fraction
@@ -301,10 +341,22 @@ def build_lattice(
             ):
                 steps[stage] = max(min_refinement_step_nm, steps[stage] / REFINEMENT_STEP_FACTOR)
                 max_lane_per_stage[stage] = _stage_max_lane(
-                    stage_centres, stage, steps[stage], cross_track_half_width_nm, margin_deg
+                    stage_centres,
+                    stage,
+                    steps[stage],
+                    cross_track_half_width_nm,
+                    margin_deg,
+                    bbox,
+                    ref_lat_deg,
                 )
                 frac = _outgoing_edge_navigable_fraction(
-                    stage_centres, steps, max_lane_per_stage, stage, geography
+                    stage_centres,
+                    steps,
+                    max_lane_per_stage,
+                    stage,
+                    geography,
+                    ref_lat_deg,
+                    lane_turn_rate_nm,
                 )
                 passes += 1
             if frac < min_navigable_edge_fraction:
@@ -321,4 +373,6 @@ def build_lattice(
         max_lane_per_stage=tuple(max_lane_per_stage),
         cross_track_step_nm=tuple(steps),
         refinement_diagnostics=tuple(diagnostics),
+        ref_lat_deg=ref_lat_deg,
+        lane_turn_rate_nm=lane_turn_rate_nm,
     )

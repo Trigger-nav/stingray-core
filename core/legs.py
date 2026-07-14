@@ -75,15 +75,20 @@ class LegNavigation:
 
 
 def leg_navigation(
-    p: LatLon, q: LatLon, stw_ms: float, t0_h: float, weather: WeatherField
+    p: LatLon,
+    q: LatLon,
+    stw_ms: float,
+    t0_h: float,
+    weather: WeatherField,
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> LegNavigation:
     """Shared course/CTS/duration/weather-sample computation (A4) — used
     both for leg costing (`evaluate_leg`) and for building execution
     setpoints (`core/optimiser.py`'s `_build_leg_targets`), so the
     current-triangle math and weather-time sampling happen in exactly one
     place."""
-    leg_distance_m = distance_m(p, q, REF_LAT_DEG)
-    course_deg = bearing_deg(p, q, REF_LAT_DEG)
+    leg_distance_m = distance_m(p, q, ref_lat_deg)
+    course_deg = bearing_deg(p, q, ref_lat_deg)
     mid = interpolate_point(p, q, 0.5)
 
     approx_duration_h = m_to_nm(leg_distance_m) / max(ms_to_kn(stw_ms), 1e-6)
@@ -102,21 +107,24 @@ def leg_navigation(
 
 
 @lru_cache(maxsize=200_000)
-def _navigable_along_leg(p: LatLon, q: LatLon, geography: Geography) -> bool:
+def _navigable_along_leg(
+    p: LatLon, q: LatLon, geography: Geography, ref_lat_deg: float = REF_LAT_DEG
+) -> bool:
     """Sample every ~`NAVIGABILITY_SAMPLE_INTERVAL_NM` along the leg (not p
     itself — matches the prior convention of relying on the previous leg's
     endpoint check / the origin being pre-validated; q is always included).
 
-    Memoised: this result depends only on (p, q, geography) — never on
-    speed, engine count, or time — but every search tries several speeds
-    and engine configs per (p, q) edge (up to 8 speeds x 2 engines = 16
-    calls), each re-running the identical distance-sampled geography check.
-    Caching this specifically (not all of `evaluate_leg`, which *does* vary
-    per speed/engine) turned a 4x sampling-density increase (the 0.25nm fix
-    above) into a slowdown large enough to matter (~10x on a full lattice
-    search) — `LatLon` is a frozen/hashable dataclass and `Geography`
-    instances are stable per search, so this is a safe, pure-function cache."""
-    leg_distance_nm = m_to_nm(distance_m(p, q, REF_LAT_DEG))
+    Memoised: this result depends only on (p, q, geography, ref_lat_deg) —
+    never on speed, engine count, or time — but every search tries several
+    speeds and engine configs per (p, q) edge (up to 8 speeds x 2 engines =
+    16 calls), each re-running the identical distance-sampled geography
+    check. Caching this specifically (not all of `evaluate_leg`, which
+    *does* vary per speed/engine) turned a 4x sampling-density increase
+    (the 0.25nm fix above) into a slowdown large enough to matter (~10x on
+    a full lattice search) — `LatLon` is a frozen/hashable dataclass and
+    `Geography` instances are stable per search, so this is a safe,
+    pure-function cache."""
+    leg_distance_nm = m_to_nm(distance_m(p, q, ref_lat_deg))
     n_samples = max(1, math.ceil(leg_distance_nm / NAVIGABILITY_SAMPLE_INTERVAL_NM))
     return all(
         geography.is_navigable(pt.lat_deg, pt.lon_deg)
@@ -131,6 +139,7 @@ def _leg_depth_ok(
     geography: Geography,
     min_depth_m: float,
     exempt_points: tuple[LatLon, ...],
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> bool:
     """Same fixed-distance sampling as `_navigable_along_leg` (a separate
     pass, not merged into it, for one-responsibility-per-function clarity
@@ -140,12 +149,12 @@ def _leg_depth_ok(
     (a declared origin/destination) skip the depth check -- pilotage
     scope, see the module-level constant's docstring. Land/no-go is
     unaffected; this is depth-only."""
-    leg_distance_nm = m_to_nm(distance_m(p, q, REF_LAT_DEG))
+    leg_distance_nm = m_to_nm(distance_m(p, q, ref_lat_deg))
     n_samples = max(1, math.ceil(leg_distance_nm / NAVIGABILITY_SAMPLE_INTERVAL_NM))
     for i in range(1, n_samples + 1):
         pt = interpolate_point(p, q, i / n_samples)
         if any(
-            m_to_nm(distance_m(pt, ep, REF_LAT_DEG)) <= DEPTH_EXEMPT_RADIUS_NM
+            m_to_nm(distance_m(pt, ep, ref_lat_deg)) <= DEPTH_EXEMPT_RADIUS_NM
             for ep in exempt_points
         ):
             continue
@@ -164,6 +173,7 @@ def evaluate_leg(
     twin: VesselTwin,
     active_engines: int,
     depth_exempt_points: tuple[LatLon, ...] = (),
+    ref_lat_deg: float = REF_LAT_DEG,
 ) -> LegResult:
     """Full leg costing: fuel/comfort/wear at commanded STW, plus the hard-
     constraint checks (A5 land/no-go via `navigable`, minimum depth via
@@ -172,12 +182,12 @@ def evaluate_leg(
     prunes on identically. `depth_exempt_points` is normally a request's
     real origin/destination (`Lattice.origin`/`.destination`, or a
     corridor's first/last waypoint) -- see `_leg_depth_ok`."""
-    nav = leg_navigation(p, q, stw_ms, t0_h, weather)
+    nav = leg_navigation(p, q, stw_ms, t0_h, weather, ref_lat_deg)
     w = nav.weather_sample
 
-    navigable = _navigable_along_leg(p, q, geography)
+    navigable = _navigable_along_leg(p, q, geography, ref_lat_deg)
     min_depth_m = twin.spec.hull.draft_m + twin.spec.min_under_keel_clearance_m
-    depth_ok = _leg_depth_ok(p, q, geography, min_depth_m, depth_exempt_points)
+    depth_ok = _leg_depth_ok(p, q, geography, min_depth_m, depth_exempt_points, ref_lat_deg)
 
     fuel_result = twin.fuel_rate(
         v_ms=stw_ms, weather=w, heading_deg=nav.course_deg, active_engines=active_engines

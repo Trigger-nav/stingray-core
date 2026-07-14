@@ -1,0 +1,5 @@
+{
+  "source": "none -- no TSS separation-zone geometry researched for this pack yet (ticket R1)",
+  "note": "Honest placeholder, matching ticket 0.8's precedent for the Bonifacio TSS file: this pack ships with zero TSS zones rather than an invented one. English Channel/SW Approaches traffic separation schemes do exist in the real world near this bbox (e.g. off the Lizard/Land's End) -- whether any fall inside this specific bbox, and their precise cited geometry (a chart or IMO routeing-system publication), is unresearched and a named follow-up, not done in this ticket, matching the same caveat CLAUDE.md's Bonifacio gotcha records for the Med pack's own placeholder.",
+  "zones": []
+}

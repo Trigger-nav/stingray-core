@@ -1,0 +1,95 @@
+# UK South-West / Channel Approaches region pack (ticket R1).
+#
+# Real GEBCO/GSHHG geography and real NOMADS weather, ingested live during
+# this ticket via the same bbox-parametric scripts B7 Part 1 built.
+# No-go/TSS zones are an honest empty placeholder (see nogo_uk_sw.json/
+# tss_uk_sw.json) -- unresearched for this ticket, not invented.
+# Ports are real, live NGA World Port Index data (ingest/fetch_wpi_ports.py).
+#
+# Findings (acceptance run, 2026-07-14), both real, both left visible
+# rather than silently tuned away:
+# (1) WPI's raw "plymouth" pin (50.36667, -4.15) sits on rasterized land
+#     (breakwater/harbour-front) at this bbox's real GSHHG resolution --
+#     not usable directly as a routing origin (core._validate_endpoint's
+#     navigability check rejects it unconditionally, anchorage or not).
+#     default_origin below is adjusted ~0.02deg south into Plymouth
+#     Sound (verified navigable, depth ~7.25m) -- the harbour approach a
+#     real passage would actually route to, not the quay itself (same
+#     "last stretch is a captain/local-knowledge job" principle
+#     DEPTH_EXEMPT_RADIUS_NM already applies once inside the search).
+# (2) WPI's raw "falmouth_harbour" pin (50.15, -5.06667) IS navigable
+#     (not land) but reads 0.0m GEBCO depth (a real inshore/tidal shoal
+#     at this resolution, below the shipped vessel spec's ~4.5m
+#     draft+UKC minimum) -- the destination-side equivalent of finding
+#     (1), same fix: default_destination below is adjusted ~0.02deg
+#     south-east into the Fal estuary approach (verified navigable,
+#     depth ~16.7m).
+# Neither adjustment changes ports.plymouth/ports.falmouth_harbour
+# themselves (real WPI data, untouched) -- only this pack's own
+# default_origin/default_destination differ from the raw pins. General
+# lesson for future packs (docs/region-pack-runbook.md): a raw named-port
+# coordinate is a facility location, not automatically a validated open-
+# water routing endpoint -- expect to verify/adjust nearby when wiring up
+# defaults, the same way core/corridors.py's hand-picked PORTS values
+# presumably already were for the Med.
+
+pack_id: uk_sw
+name: UK South-West / Channel Approaches
+bbox:
+- -5.5
+- 49.8
+- -3.5
+- 50.8
+ref_lat_deg: 50.3
+coastline_path: data/region_packs/uk_sw/coastline_uk_sw.json
+bathymetry_path: data/region_packs/uk_sw/bathymetry_uk_sw.npz
+nogo_path: data/region_packs/uk_sw/nogo_uk_sw.json
+tss_path: data/region_packs/uk_sw/tss_uk_sw.json
+weather_npz_path: data/region_packs/uk_sw/weather_uk_sw.npz
+ports:
+  brixham_harbour:
+  - 50.4
+  - -3.5166666666666666
+  charlestown:
+  - 50.333333333333336
+  - -4.75
+  dartmouth_harbour:
+  - 50.35
+  - -3.6166666666666667
+  falmouth_harbour:
+  - 50.15
+  - -5.066666666666666
+  fowey_harbour:
+  - 50.333333333333336
+  - -4.633333333333333
+  hayle:
+  - 50.18333333333333
+  - -5.416666666666667
+  mevagissey:
+  - 50.266666666666666
+  - -4.783333333333333
+  padstow:
+  - 50.55
+  - -4.933333333333334
+  par:
+  - 50.35
+  - -4.7
+  plymouth:
+  - 50.36666666666667
+  - -4.15
+  teignmouth_harbour:
+  - 50.55
+  - -3.5
+  torquay_harbour:
+  - 50.46666666666667
+  - -3.533333333333333
+default_origin:
+- 50.34666666666667
+- -4.15
+default_destination:
+- 50.13
+- -5.046666666666666
+lane_turn_rate_nm: 15.0
+min_navigable_edge_fraction: 0.75
+min_refinement_step_nm: 0.5
+legacy_corridors: []
