@@ -33,6 +33,17 @@ libeccodes-dev`) — not installable via pip alone.
 
 Usage: python3 -m ingest.fetch_grib_nomads [--out PATH] [--horizon-h H]
        [--cycle-date YYYYMMDD --cycle-hour HH]
+       [--bbox LON_MIN LAT_MIN LON_MAX LAT_MAX]
+       [--coastline-path PATH] [--bathymetry-path PATH]
+       [--nogo-path PATH] [--tss-path PATH]
+
+**Ticket B7 Part 1:** `--bbox` defaults to `core.geography.
+OPERATING_AREA_BBOX` (western Med); a different bbox requires `--out`
+explicitly (same clobber guard as `fetch_gshhg.py`/`fetch_gebco.py`) and
+should be paired with `--coastline-path`/`--bathymetry-path`/etc pointing
+at that bbox's own geography files -- otherwise land-masking below runs
+against the default western-Med `RealGeography`, which is wrong for a
+different bbox.
 """
 
 from __future__ import annotations
@@ -93,8 +104,15 @@ def _get_var(ds: xr.Dataset, name: str) -> xr.DataArray:
     return ds[name]
 
 
-def _grib_filter_url(script: str, *, dir_path: str, file_name: str, extra: dict) -> str:
-    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+def _grib_filter_url(
+    script: str,
+    *,
+    dir_path: str,
+    file_name: str,
+    extra: dict,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+) -> str:
+    lon_min, lat_min, lon_max, lat_max = bbox
     params = {
         "dir": dir_path,
         "file": file_name,
@@ -117,24 +135,38 @@ def _open_grib(path: Path) -> xr.Dataset:
     return xr.open_dataset(path, engine="cfgrib", backend_kwargs={"indexpath": ""})
 
 
-def fetch_wind_step(cache_dir: Path, cycle_date: str, cycle_hour: str, step_h: int) -> xr.Dataset:
+def fetch_wind_step(
+    cache_dir: Path,
+    cycle_date: str,
+    cycle_hour: str,
+    step_h: int,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+) -> xr.Dataset:
     url = _grib_filter_url(
         "filter_gfs_0p25_1hr.pl",
         dir_path=f"/gfs.{cycle_date}/{cycle_hour}/atmos",
         file_name=f"gfs.t{cycle_hour}z.pgrb2.0p25.f{step_h:03d}",
         extra={"var_UGRD": "on", "var_VGRD": "on", "lev_10_m_above_ground": "on"},
+        bbox=bbox,
     )
     dest = cache_dir / f"wind_f{step_h:03d}.grib2"
     _download(url, dest)
     return _open_grib(dest)
 
 
-def fetch_wave_step(cache_dir: Path, cycle_date: str, cycle_hour: str, step_h: int) -> xr.Dataset:
+def fetch_wave_step(
+    cache_dir: Path,
+    cycle_date: str,
+    cycle_hour: str,
+    step_h: int,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
+) -> xr.Dataset:
     url = _grib_filter_url(
         "filter_gfswave.pl",
         dir_path=f"/gfs.{cycle_date}/{cycle_hour}/wave/gridded",
         file_name=f"gfswave.t{cycle_hour}z.global.0p16.f{step_h:03d}.grib2",
         extra={"var_HTSGW": "on", "var_PERPW": "on", "var_DIRPW": "on"},
+        bbox=bbox,
     )
     dest = cache_dir / f"wave_f{step_h:03d}.grib2"
     _download(url, dest)
@@ -142,7 +174,11 @@ def fetch_wave_step(cache_dir: Path, cycle_date: str, cycle_hour: str, step_h: i
 
 
 def build_grid(
-    cycle_date: str, cycle_hour: str, horizon_h: float, geography: RealGeography
+    cycle_date: str,
+    cycle_hour: str,
+    horizon_h: float,
+    geography: RealGeography,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
 ) -> dict:
     """GFS wind (0.25°) and WW3 wave (0.16°) are different native grids —
     `GriddedWeatherField`/the npz schema need exactly one shared (lat, lon)
@@ -162,10 +198,10 @@ def build_grid(
         cache_dir = Path(tmp)
         for step_h in steps:
             wind_ds = normalise_and_sort_dataset(
-                fetch_wind_step(cache_dir, cycle_date, cycle_hour, step_h)
+                fetch_wind_step(cache_dir, cycle_date, cycle_hour, step_h, bbox)
             )
             wave_ds = normalise_and_sort_dataset(
-                fetch_wave_step(cache_dir, cycle_date, cycle_hour, step_h)
+                fetch_wave_step(cache_dir, cycle_date, cycle_hour, step_h, bbox)
             )
             wave_ds = wave_ds.interp(latitude=wind_ds.latitude, longitude=wind_ds.longitude)
 
@@ -217,22 +253,58 @@ def build_grid(
     }
 
 
+_DEFAULT_OUT = "data/weather/nomads_western_med.npz"
+
+
+def _geography_kwargs_from_args(args: argparse.Namespace) -> dict[str, str]:
+    kwargs = {}
+    if args.coastline_path:
+        kwargs["coastline_path"] = args.coastline_path
+    if args.bathymetry_path:
+        kwargs["bathymetry_path"] = args.bathymetry_path
+    if args.nogo_path:
+        kwargs["nogo_path"] = args.nogo_path
+    if args.tss_path:
+        kwargs["tss_path"] = args.tss_path
+    return kwargs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="data/weather/nomads_western_med.npz")
+    parser.add_argument("--out", default=_DEFAULT_OUT)
     parser.add_argument("--horizon-h", type=float, default=DEFAULT_HORIZON_H)
     parser.add_argument("--cycle-date", default=None, help="YYYYMMDD; default: latest available")
     parser.add_argument("--cycle-hour", default=None, help="00/06/12/18; default: latest available")
+    parser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        default=None,
+        help="defaults to core.geography.OPERATING_AREA_BBOX (western Med)",
+    )
+    parser.add_argument("--coastline-path", default=None)
+    parser.add_argument("--bathymetry-path", default=None)
+    parser.add_argument("--nogo-path", default=None)
+    parser.add_argument("--tss-path", default=None)
     args = parser.parse_args()
 
+    bbox = tuple(args.bbox) if args.bbox else OPERATING_AREA_BBOX
+    if bbox != OPERATING_AREA_BBOX and args.out == _DEFAULT_OUT:
+        parser.error(
+            "--bbox differs from OPERATING_AREA_BBOX -- --out must be set explicitly "
+            "too, so this run can't overwrite the committed western-Med data by "
+            "falling back to its default path"
+        )
+
     now_utc = datetime.now(UTC)
-    geography = RealGeography()
+    geography = RealGeography(**_geography_kwargs_from_args(args))
     if args.cycle_date and args.cycle_hour:
         # An explicit cycle is a human asking for exactly that cycle --
         # get it or a clear error, not a silent fallback substitution.
         cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
         print(f"fetching GFS+WW3 cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
-        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography, bbox)
     else:
         cycle_date, cycle_hour = latest_available_cycle_utc(
             now_utc, delay_h=NOMADS_DELAY_H, valid_hours=NOMADS_VALID_HOURS
@@ -243,7 +315,7 @@ def main() -> None:
             cycle_hour,
             valid_hours=NOMADS_VALID_HOURS,
             max_attempts=MAX_CYCLE_FALLBACK_ATTEMPTS,
-            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography),
+            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography, bbox),
         )
 
     write_npz_atomic(

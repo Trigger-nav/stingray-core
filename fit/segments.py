@@ -48,6 +48,19 @@ class SteadyStateSegment:
     mean_wave_from_deg: float
     duration_h: float
     n_samples: int
+    # ticket B7 Parts 3/4, additive -- every existing caller (extract_
+    # steady_state_segments below, fit/synthetic.py's generator) leaves
+    # these at their defaults, so this doesn't change today's behaviour
+    # anywhere. Populated post-extraction by fit/import_pipeline.py's
+    # stamp_segment_provenance (`dataclasses.replace`) -- extraction
+    # itself has no concept of provenance and shouldn't grow one.
+    # fuel_noise_multiplier feeds fit_calm_resistance/fit_added_
+    # resistance's residual weighting (`fuel_noise_std_fraction *
+    # mean_fuel_kg_per_h * fuel_noise_multiplier`) -- the actual
+    # mechanism behind per-source noise handling.
+    vessel_id: str | None = None
+    passage_id: str | None = None
+    fuel_noise_multiplier: float = 1.0
 
 
 def _circular_diff_deg(a_deg: float, b_deg: float) -> float:

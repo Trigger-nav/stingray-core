@@ -41,6 +41,14 @@ ingest = [
     # fetch_grib_nomads.py) requires scipy at runtime -- found on first
     # real run, missing from the original ticket 0.5 declaration.
     "scipy>=1.11",
+    # ticket B7 Part 2 (ingest/fetch_era5_track.py) -- ERA5 reanalysis via
+    # the Copernicus Climate Data Store. Unlike cfgrib's system-C-library
+    # caveat above, cdsapi is pip-installable on its own; its "setup cost"
+    # is a *registered account*, not a build toolchain -- a free CDS
+    # account, accepting the ERA5 single-levels dataset's licence, and an
+    # API key written to `~/.cdsapirc`, done once per machine. Not
+    # anonymous like NOMADS/ECMWF open data.
+    "cdsapi>=0.7",
 ]
 # fit/-only: twin parameter fitting (ticket 0.6) needs real nonlinear
 # least-squares (scipy.optimize) -- core/ stays numpy+PyYAML only (see

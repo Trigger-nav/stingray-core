@@ -47,9 +47,13 @@ OPERATING_AREA_BBOX = (6.7, 40.75, 10.15, 44.0)
 
 
 class OutOfOperatingAreaError(ValueError):
-    """Raised when RealGeography is queried outside OPERATING_AREA_BBOX —
-    real data doesn't exist there, so silently returning "not land"/a
-    clamped depth would be misleading rather than merely imprecise."""
+    """Raised when a `RealGeography` instance is queried outside the area
+    its loaded data actually covers — real data doesn't exist there, so
+    silently returning "not land"/a clamped depth would be misleading
+    rather than merely imprecise. The default-constructed instance covers
+    `OPERATING_AREA_BBOX` (western Med); an instance loaded from a
+    different bbox's files (ticket B7 Part 1) covers whatever bbox that
+    data was cropped to instead — see `RealGeography._check_in_bounds`."""
 
 
 # Land polygons (lat, lon) — western Mediterranean corridor, synthetic/hand-drawn.
@@ -183,15 +187,6 @@ NOGO: list[dict] = [
 
 DEFAULT_NOGO_PATH = "data/geography/nogo_western_med.json"
 DEFAULT_TSS_PATH = "data/geography/tss_western_med.json"
-
-
-def _check_in_bounds(lat_deg: float, lon_deg: float) -> None:
-    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
-    if not (lat_min <= lat_deg <= lat_max and lon_min <= lon_deg <= lon_max):
-        raise OutOfOperatingAreaError(
-            f"({lat_deg}, {lon_deg}) is outside OPERATING_AREA_BBOX {OPERATING_AREA_BBOX} — "
-            "no real GSHHG/GEBCO data covers this point"
-        )
 
 
 def _is_nogo_synthetic(lat: float, lon: float) -> bool:
@@ -331,10 +326,44 @@ class RealGeography:
             lat_deg, lon_deg, self._lat0, self._dlat, self._lon0, self._dlon, self._nlat, self._nlon
         )
 
+    def _check_in_bounds(self, lat_deg: float, lon_deg: float) -> None:
+        """Bounds derived from *this instance's own loaded grid*
+        (`self._lat0`/`_dlat`/`_nlat`/`_lon0`/`_dlon`/`_nlon`, already
+        computed in `__init__` from whatever `bathymetry_path` was
+        loaded) — not the module-level `OPERATING_AREA_BBOX` constant.
+        Found during ticket B7 planning: a `RealGeography` instance
+        pointed at a *different* bbox's data files (Part 1, track-driven
+        ingest) would otherwise validate against the wrong (western-Med)
+        bounds regardless of what it actually loaded. `core/lattice.py`
+        deliberately still hard-imports `OPERATING_AREA_BBOX` directly for
+        lattice-clipping — a separate, untouched concern (routing/lattice
+        feature freeze) — this bound method only affects `RealGeography`'s
+        own point queries.
+
+        Extended by half a grid step in each direction: `lat0_deg`/
+        `lon0_deg` are the *first sample's* coordinate, not the covered
+        area's edge — GEBCO/GSHHG ingest crops to a request bbox whose
+        edge sits half a cell outside the first/last sample point
+        (confirmed against the committed western-Med data:
+        `lat0 - dlat/2 == OPERATING_AREA_BBOX`'s `lat_min` exactly). Also
+        matches `core.gridding.grid_fracs`'s own clamping, which already
+        tolerates queries into the outer half of the boundary cells."""
+        lat_edge = self._lat0 + self._dlat * (self._nlat - 1)
+        lon_edge = self._lon0 + self._dlon * (self._nlon - 1)
+        half_dlat, half_dlon = abs(self._dlat) / 2, abs(self._dlon) / 2
+        lat_min, lat_max = sorted((self._lat0 - half_dlat, lat_edge + half_dlat))
+        lon_min, lon_max = sorted((self._lon0 - half_dlon, lon_edge + half_dlon))
+        if not (lat_min <= lat_deg <= lat_max and lon_min <= lon_deg <= lon_max):
+            raise OutOfOperatingAreaError(
+                f"({lat_deg}, {lon_deg}) is outside this RealGeography instance's "
+                f"loaded bounds (lat {lat_min}..{lat_max}, lon {lon_min}..{lon_max}) — "
+                "no real GSHHG/GEBCO data covers this point"
+            )
+
     def is_land(self, lat_deg: float, lon_deg: float) -> bool:
         """Rasterised lookup (fast hot path) — see `is_land_precise` for the
         GSHHG polygon ray-cast this raster was generated from."""
-        _check_in_bounds(lat_deg, lon_deg)
+        self._check_in_bounds(lat_deg, lon_deg)
         if self._land_mask is None:
             return self.is_land_precise(lat_deg, lon_deg)
         fy, fx = self._grid_fracs(lat_deg, lon_deg)
@@ -355,7 +384,7 @@ class RealGeography:
         """GEBCO elevation is negative for depth, positive for land/above
         sea level; a positive-elevation grid cell (land, per the real
         dataset) reads as zero depth rather than a negative number."""
-        _check_in_bounds(lat_deg, lon_deg)
+        self._check_in_bounds(lat_deg, lon_deg)
         fy, fx = self._grid_fracs(lat_deg, lon_deg)
         elevation_m = bilinear(self._elevation_m, fy, fx)
         return max(0.0, -float(elevation_m))

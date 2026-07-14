@@ -106,8 +106,12 @@ def fit_added_resistance(
         spec = _candidate_spec(x, base_spec)
         data_res = []
         for seg in segments:
+            # seg.fuel_noise_multiplier (ticket B7 Part 3) is 1.0 for every
+            # segment that never passed through fit/import_pipeline.py's
+            # stamp_segment_provenance -- a no-op for every pre-B7 caller.
             noise_std = max(
-                fuel_noise_floor_kg_per_h, fuel_noise_std_fraction * seg.mean_fuel_kg_per_h
+                fuel_noise_floor_kg_per_h,
+                fuel_noise_std_fraction * seg.mean_fuel_kg_per_h * seg.fuel_noise_multiplier,
             )
             data_res.append(
                 (_predict_fuel_kg_per_h(spec, seg) - seg.mean_fuel_kg_per_h) / noise_std

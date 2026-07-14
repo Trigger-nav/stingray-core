@@ -30,7 +30,20 @@ available and is what the raster is tested against, not replaced.
 Requires pyshp + shapely (ingest-only deps, see pyproject.toml's `ingest`
 extra) — core/ stays numpy+PyYAML only.
 
-Usage: python3 -m ingest.fetch_gshhg [--cache-dir DIR] [--out PATH] [--bathymetry PATH]
+**Ordering gotcha (ticket B7 Part 1):** the land-mask rasterisation step
+requires `--bathymetry` to already exist — always run `fetch_gebco.py`
+*before* this script for any bbox, new or default, since this script
+reads that npz's grid geometry to rasterise onto.
+
+Usage: python3 -m ingest.fetch_gshhg [--cache-dir DIR] [--out PATH]
+       [--bathymetry PATH] [--bbox LON_MIN LAT_MIN LON_MAX LAT_MAX]
+
+`--bbox` defaults to `core.geography.OPERATING_AREA_BBOX` (the committed
+western-Med corridor). Passing a *different* bbox (ticket B7's
+track-driven ingest) requires `--out`/`--bathymetry` to also be given
+explicitly — every default filename here is `*_western_med`, and a second
+bbox's ingest run must never silently clobber the committed western-Med
+files by falling back to the same default path.
 """
 
 from __future__ import annotations
@@ -111,19 +124,40 @@ def rasterize_onto_grid(
     return contains_xy(union, lon_mesh, lat_mesh)
 
 
+_DEFAULT_OUT = "data/geography/coastline_western_med.json"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache-dir", default=".cache/gshhg", help="local download/extract cache")
-    parser.add_argument("--out", default="data/geography/coastline_western_med.json")
+    parser.add_argument("--out", default=_DEFAULT_OUT)
     parser.add_argument(
         "--bathymetry",
         default=DEFAULT_BATHYMETRY_PATH,
         help="existing bathymetry npz (run fetch_gebco.py first) to rasterize the land mask onto",
     )
+    parser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        default=None,
+        help="defaults to core.geography.OPERATING_AREA_BBOX (western Med)",
+    )
     args = parser.parse_args()
 
+    bbox = tuple(args.bbox) if args.bbox else OPERATING_AREA_BBOX
+    out_is_default = args.out == _DEFAULT_OUT
+    bathymetry_is_default = args.bathymetry == DEFAULT_BATHYMETRY_PATH
+    if bbox != OPERATING_AREA_BBOX and (out_is_default or bathymetry_is_default):
+        parser.error(
+            "--bbox differs from OPERATING_AREA_BBOX -- both --out and --bathymetry "
+            "must be set explicitly too, so this run can't overwrite the committed "
+            "western-Med data by falling back to its default path"
+        )
+
     shp_path = _ensure_shapefile(Path(args.cache_dir))
-    polygons = clip_to_bbox(shp_path, OPERATING_AREA_BBOX)
+    polygons = clip_to_bbox(shp_path, bbox)
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -131,7 +165,7 @@ def main() -> None:
         json.dumps(
             {
                 "source": "GSHHG 2.3.7, high resolution, L1 (land/ocean boundary), clipped to bbox",
-                "bbox_lon_lat": list(OPERATING_AREA_BBOX),
+                "bbox_lon_lat": list(bbox),
                 "polygons": polygons,
             }
         )

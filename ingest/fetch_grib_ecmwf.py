@@ -35,6 +35,18 @@ libeccodes-dev`) — not installable via pip alone.
 
 Usage: python3 -m ingest.fetch_grib_ecmwf [--out PATH] [--horizon-h H]
        [--cycle-date YYYYMMDD --cycle-hour HH]
+       [--bbox LON_MIN LAT_MIN LON_MAX LAT_MAX]
+       [--coastline-path PATH] [--bathymetry-path PATH]
+       [--nogo-path PATH] [--tss-path PATH]
+
+**Ticket B7 Part 1:** `--bbox` defaults to `core.geography.
+OPERATING_AREA_BBOX` (western Med); a different bbox requires `--out`
+explicitly (same clobber guard as `fetch_gshhg.py`/`fetch_gebco.py`) and
+should be paired with `--coastline-path`/`--bathymetry-path`/etc pointing
+at that bbox's own geography files (run `fetch_gebco.py`/`fetch_gshhg.py`
+for the new bbox first) -- otherwise land-masking below runs against the
+default western-Med `RealGeography`, which is wrong for a different bbox
+and may silently reject/accept the wrong points.
 """
 
 from __future__ import annotations
@@ -109,14 +121,18 @@ def _open_single_param_grib(cache_dir: Path, name: str, data: bytes) -> xr.Datas
     return xr.open_dataset(dest, engine="cfgrib", backend_kwargs={"indexpath": ""})
 
 
-def _crop_to_bbox(ds: xr.Dataset) -> xr.Dataset:
-    lon_min, lat_min, lon_max, lat_max = OPERATING_AREA_BBOX
+def _crop_to_bbox(ds: xr.Dataset, bbox: tuple[float, float, float, float]) -> xr.Dataset:
+    lon_min, lat_min, lon_max, lat_max = bbox
     ds = normalise_and_sort_dataset(ds)
     return ds.sel(latitude=slice(lat_min, lat_max), longitude=slice(lon_min, lon_max))
 
 
 def fetch_step(
-    cache_dir: Path, cycle_date: str, cycle_hour: str, step_h: int
+    cache_dir: Path,
+    cycle_date: str,
+    cycle_hour: str,
+    step_h: int,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
 ) -> dict[str, xr.DataArray]:
     oper_base = _stream_url_base(cycle_date, cycle_hour, "oper")
     wave_base = _stream_url_base(cycle_date, cycle_hour, "wave")
@@ -124,17 +140,21 @@ def fetch_step(
     fields: dict[str, xr.DataArray] = {}
     for out_name, param in WIND_PARAMS.items():
         data = _fetch_param_message(oper_base, step_h, "oper", param)
-        ds = _crop_to_bbox(_open_single_param_grib(cache_dir, f"wind_{param}_{step_h}", data))
+        ds = _crop_to_bbox(_open_single_param_grib(cache_dir, f"wind_{param}_{step_h}", data), bbox)
         fields[out_name] = ds[next(iter(ds.data_vars))]
     for out_name, param in WAVE_PARAMS.items():
         data = _fetch_param_message(wave_base, step_h, "wave", param)
-        ds = _crop_to_bbox(_open_single_param_grib(cache_dir, f"wave_{param}_{step_h}", data))
+        ds = _crop_to_bbox(_open_single_param_grib(cache_dir, f"wave_{param}_{step_h}", data), bbox)
         fields[out_name] = ds[next(iter(ds.data_vars))]
     return fields
 
 
 def build_grid(
-    cycle_date: str, cycle_hour: str, horizon_h: float, geography: RealGeography
+    cycle_date: str,
+    cycle_hour: str,
+    horizon_h: float,
+    geography: RealGeography,
+    bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
 ) -> dict:
     steps = list(range(0, int(horizon_h) + 1, STEP_H))
     hours = np.array(steps, dtype=float)
@@ -145,7 +165,7 @@ def build_grid(
     with tempfile.TemporaryDirectory() as tmp:
         cache_dir = Path(tmp)
         for step_h in steps:
-            step_fields = fetch_step(cache_dir, cycle_date, cycle_hour, step_h)
+            step_fields = fetch_step(cache_dir, cycle_date, cycle_hour, step_h, bbox)
             if lats is None:
                 lats = step_fields["u10_ms"].latitude.values.astype(float)
                 lons = step_fields["u10_ms"].longitude.values.astype(float)
@@ -179,22 +199,58 @@ def build_grid(
     }
 
 
+_DEFAULT_OUT = "data/weather/ecmwf_western_med.npz"
+
+
+def _geography_kwargs_from_args(args: argparse.Namespace) -> dict[str, str]:
+    kwargs = {}
+    if args.coastline_path:
+        kwargs["coastline_path"] = args.coastline_path
+    if args.bathymetry_path:
+        kwargs["bathymetry_path"] = args.bathymetry_path
+    if args.nogo_path:
+        kwargs["nogo_path"] = args.nogo_path
+    if args.tss_path:
+        kwargs["tss_path"] = args.tss_path
+    return kwargs
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", default="data/weather/ecmwf_western_med.npz")
+    parser.add_argument("--out", default=_DEFAULT_OUT)
     parser.add_argument("--horizon-h", type=float, default=DEFAULT_HORIZON_H)
     parser.add_argument("--cycle-date", default=None, help="YYYYMMDD; default: latest available")
     parser.add_argument("--cycle-hour", default=None, help="00/06/12/18; default: latest available")
+    parser.add_argument(
+        "--bbox",
+        type=float,
+        nargs=4,
+        metavar=("LON_MIN", "LAT_MIN", "LON_MAX", "LAT_MAX"),
+        default=None,
+        help="defaults to core.geography.OPERATING_AREA_BBOX (western Med)",
+    )
+    parser.add_argument("--coastline-path", default=None)
+    parser.add_argument("--bathymetry-path", default=None)
+    parser.add_argument("--nogo-path", default=None)
+    parser.add_argument("--tss-path", default=None)
     args = parser.parse_args()
 
+    bbox = tuple(args.bbox) if args.bbox else OPERATING_AREA_BBOX
+    if bbox != OPERATING_AREA_BBOX and args.out == _DEFAULT_OUT:
+        parser.error(
+            "--bbox differs from OPERATING_AREA_BBOX -- --out must be set explicitly "
+            "too, so this run can't overwrite the committed western-Med data by "
+            "falling back to its default path"
+        )
+
     now_utc = datetime.now(UTC)
-    geography = RealGeography()
+    geography = RealGeography(**_geography_kwargs_from_args(args))
     if args.cycle_date and args.cycle_hour:
         # An explicit cycle is a human asking for exactly that cycle --
         # get it or a clear error, not a silent fallback substitution.
         cycle_date, cycle_hour = args.cycle_date, args.cycle_hour
         print(f"fetching ECMWF IFS cycle {cycle_date} {cycle_hour}z, horizon {args.horizon_h}h ...")
-        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography)
+        grid = build_grid(cycle_date, cycle_hour, args.horizon_h, geography, bbox)
     else:
         cycle_date, cycle_hour = latest_available_cycle_utc(
             now_utc, delay_h=ECMWF_DELAY_H, valid_hours=ECMWF_VALID_HOURS
@@ -205,7 +261,7 @@ def main() -> None:
             cycle_hour,
             valid_hours=ECMWF_VALID_HOURS,
             max_attempts=MAX_CYCLE_FALLBACK_ATTEMPTS,
-            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography),
+            attempt=lambda d, h: build_grid(d, h, args.horizon_h, geography, bbox),
         )
 
     write_npz_atomic(

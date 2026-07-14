@@ -24,3 +24,9 @@ docs_assets_system_overview.png
 # artefacts, not repo content. Run ingest/fetch_grib_nomads.py /
 # fetch_grib_ecmwf.py to produce them locally.
 data/weather/*.npz
+
+# ticket B7: per-track-driven-region geography/weather/annotated-track
+# data (data/historical/README.md has the convention) -- real historical
+# vessel data is ticket B6's job, never committed here; keep the README
+# itself tracked.
+data/historical/*/
