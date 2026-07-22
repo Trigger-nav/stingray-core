@@ -6,3 +6,5 @@
 packs:
   - data/region_packs/med.yaml
   - data/region_packs/uk_sw.yaml
+  - data/region_packs/med_full.yaml
+  - data/region_packs/caribbean.yaml

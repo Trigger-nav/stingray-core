@@ -1,0 +1,5 @@
+{
+  "source": "none -- no TSS separation-zone geometry researched for this pack yet (ticket R2-lite)",
+  "note": "Honest placeholder, matching ticket 0.8/R1's precedent. Real IMO-adopted TSS schemes are known to exist within this bbox -- the Strait of Gibraltar and the Strait of Messina both have real, chart-published traffic separation schemes -- but their precise cited geometry (a chart or IMO routeing-system publication) is unresearched here, a named follow-up, not done in this ticket.",
+  "zones": []
+}

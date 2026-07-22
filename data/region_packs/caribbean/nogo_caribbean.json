@@ -1,0 +1,5 @@
+{
+  "source": "none -- no no-go zones researched for this pack yet (ticket R2-lite)",
+  "note": "Honest placeholder, matching ticket 0.8/R1's precedent for a pack with no researched zones -- an empty zones list needs zero code changes to core.geography._load_nogo_polygons. Real marine-protected-area candidates likely exist across this bbox (e.g. around the Virgin Islands, the Grenadines) -- unresearched, a named follow-up, not done in this ticket.",
+  "zones": []
+}

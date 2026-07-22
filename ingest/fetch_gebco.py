@@ -31,6 +31,7 @@ import argparse
 import logging
 from pathlib import Path
 
+import aiohttp
 import fsspec
 import numpy as np
 import xarray as xr
@@ -58,11 +59,27 @@ def _bbox_area_deg2(bbox: tuple[float, float, float, float]) -> float:
     return abs(lon_max - lon_min) * abs(lat_max - lat_min)
 
 
+# Ticket R2-lite: found empirically -- fsspec's default aiohttp client
+# timeout (no explicit client_kwargs before this fix) aborted a large
+# (200+ deg^2) bbox's single `.values` read with `FSTimeoutError` after
+# ~14 minutes, well before the transfer itself completed. `.values` pulls
+# the whole selected slice in one shot (not incrementally chunked at this
+# layer), so one bbox this size means one long-lived HTTP read -- a short
+# default total timeout has no way to distinguish "still transferring" from
+# "stalled". A generous, explicit total timeout (not `None` -- an
+# unbounded hang on a genuinely stalled connection is worse than a long
+# but real timeout) fixes this without changing anything about how much
+# data is fetched.
+_HTTP_TIMEOUT_S = 3600.0
+
+
 def fetch_subset(
     bbox: tuple[float, float, float, float],
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     lon_min, lat_min, lon_max, lat_max = bbox
-    fs = fsspec.filesystem("http")
+    fs = fsspec.filesystem(
+        "http", client_kwargs={"timeout": aiohttp.ClientTimeout(total=_HTTP_TIMEOUT_S)}
+    )
     f = fs.open(GEBCO_URL, mode="rb")
     ds = xr.open_dataset(f, engine="h5netcdf")
     sub = ds.sel(lat=slice(lat_min, lat_max), lon=slice(lon_min, lon_max))
