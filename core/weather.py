@@ -130,16 +130,26 @@ class GriddedWeatherField:
     """Bilinear-in-space, linear-in-time interpolation over a regular
     lat/lon/time grid. Directions interpolate via vector components.
 
-    Land-masking (B2) is wave-only, per ticket 0.5: `hs_m`/periods/wave
-    direction use `bilinear_masked` (renormalises over whichever corners
-    aren't NaN, only fully-missing when *all four* are — see
+    Land-masking (B2) is wave-and-current, not wind, per ticket 0.5/C1:
+    `hs_m`/periods/wave direction, and (since C1) `current_u_ms`/
+    `current_v_ms`, use `bilinear_masked` (renormalises over whichever
+    corners aren't NaN, only fully-missing when *all four* are — see
     `core/gridding.py`), so a point near shore (an anchorage approach,
-    say) still gets a real wave estimate from its valid neighbours instead
-    of reading as missing just because one stencil corner is land. Wind is
-    never land-masked at ingest in the first place: an over-land GFS/IFS
-    wind value is a real model output, not a hardcoded-calm artefact the
-    way the demo's wave field was, so there's no equivalent bug to guard
-    against and plain `bilinear` is used for it.
+    say) still gets a real wave/current estimate from its valid
+    neighbours instead of reading as missing just because one stencil
+    corner is land. Wind is never land-masked at ingest in the first
+    place: an over-land GFS/IFS wind value is a real model output, not a
+    hardcoded-calm artefact the way the demo's wave field was, so there's
+    no equivalent bug to guard against and plain `bilinear` is used for
+    it. Current is ocean-only data (unlike wind) with no equivalent
+    over-land meaning, so it follows wave's treatment, not wind's — found
+    during ticket C1 while tracing what happens once current stops being
+    a uniform zero: plain `bilinear` propagates any single NaN stencil
+    corner to a fully-missing result, and a real ocean-current product
+    masks land far more aggressively near shore than GFS/IFS wind does —
+    exactly where routing endpoints tend to live. Verified freeze-
+    compatible: a uniform-zero current array has no NaNs anywhere, so
+    `bilinear_masked` and `bilinear` are numerically identical on it.
 
     All arrays are shaped (n_hours, n_lat, n_lon).
     """
@@ -163,6 +173,9 @@ class GriddedWeatherField:
         cycle: str | None = None,
         fetched: str | None = None,
         source: str | None = None,
+        current_cycle: str | None = None,
+        current_fetched: str | None = None,
+        current_source: str | None = None,
     ) -> None:
         self._lat0, self._dlat = lat0_deg, dlat_deg
         self._lon0, self._dlon = lon0_deg, dlon_deg
@@ -180,10 +193,18 @@ class GriddedWeatherField:
         _, self._nlat, self._nlon = self._hs.shape
         # Provenance (ticket 0.5): which model cycle, when this field was
         # fetched, and from where -- None for in-memory/test-built fields
-        # that were never loaded from an ingest npz.
+        # that were never loaded from an ingest npz. Ticket C1: a
+        # separate current_cycle/current_fetched/current_source triple,
+        # since currents are fetched from a different source (CMEMS) at a
+        # different cadence than wind/wave -- all None (not "modelled but
+        # happens to read zero") for a pack that never enables currents
+        # (RegionPack.currents_dataset_id unset) or hasn't been merged yet.
         self.cycle = cycle
         self.fetched = fetched
         self.source = source
+        self.current_cycle = current_cycle
+        self.current_fetched = current_fetched
+        self.current_source = current_source
 
     @classmethod
     def from_npz(cls, path: str | Path) -> GriddedWeatherField:
@@ -212,6 +233,13 @@ class GriddedWeatherField:
             cycle=str(grid["cycle"]) if "cycle" in grid else None,
             fetched=str(grid["fetched"]) if "fetched" in grid else None,
             source=str(grid["source"]) if "source" in grid else None,
+            # Ticket C1: same defensive `in grid` pattern as the three
+            # fields above -- an npz written before this ticket (or by an
+            # older fetch_grib_*.py mid-upgrade) has none of these keys
+            # at all, and must load as "not modelled" (None), not KeyError.
+            current_cycle=str(grid["current_cycle"]) if "current_cycle" in grid else None,
+            current_fetched=str(grid["current_fetched"]) if "current_fetched" in grid else None,
+            current_source=str(grid["current_source"]) if "current_source" in grid else None,
         )
 
     def _grid_fracs(self, lat_deg: float, lon_deg: float) -> tuple[float, float]:
@@ -239,8 +267,8 @@ class GriddedWeatherField:
         mean = at(self._period_mean, masked=True)
         wind_u = at(self._wind_u)
         wind_v = at(self._wind_v)
-        current_u = at(self._current_u)
-        current_v = at(self._current_v)
+        current_u = at(self._current_u, masked=True)
+        current_v = at(self._current_v, masked=True)
         wdu, wdv = at(self._wave_dir_u, masked=True), at(self._wave_dir_v, masked=True)
         wave_from_deg = (
             float("nan")

@@ -49,6 +49,15 @@ ingest = [
     # API key written to `~/.cdsapirc`, done once per machine. Not
     # anonymous like NOMADS/ECMWF open data.
     "cdsapi>=0.7",
+    # ticket C1 (ingest/fetch_currents_cmems.py) -- surface currents via
+    # the Copernicus Marine Service. Same registered-account shape as
+    # cdsapi above, not cfgrib's system-library one: pure Python
+    # (xarray/zarr/requests-based, no eccodes-equivalent dependency), a
+    # free account, and credentials via COPERNICUSMARINE_SERVICE_USERNAME/
+    # COPERNICUSMARINE_SERVICE_PASSWORD env vars (this repo's preferred
+    # form, matching Settings.from_env()'s own env-var-first convention)
+    # or copernicusmarine.login()'s ~/.copernicusmarine credentials file.
+    "copernicusmarine>=2.4",
 ]
 # fit/-only: twin parameter fitting (ticket 0.6) needs real nonlinear
 # least-squares (scipy.optimize) -- core/ stays numpy+PyYAML only (see

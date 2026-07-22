@@ -129,6 +129,12 @@ class PlanRequestIn(BaseModel):
     # supplied, converted and used for this job only -- forward-compatible
     # with per-vessel requests without building real multi-tenancy now.
     vessel: VesselSpecModel | None = None
+    # Ticket S1: post-search waypoint distillation -- a plain same-name
+    # mirror of core.optimiser.PlanRequest.distill, default True so every
+    # existing caller (the hosted demo included) sees the improvement with
+    # zero client changes. False reproduces the pre-S1, undistilled search
+    # output exactly.
+    distill: bool = True
 
 
 class LegTargetModel(BaseModel):
@@ -226,6 +232,13 @@ class HealthOut(BaseModel):
     weather_source: str | None = None
     weather_cycle: str | None = None
     weather_fetched: str | None = None
+    # Ticket C1: all None for a pack that never enables currents
+    # (RegionPack.currents_dataset_id unset) -- an explicit "none, not
+    # modelled" signal, not indistinguishable from "modelled but happens
+    # to read zero".
+    currents_source: str | None = None
+    currents_cycle: str | None = None
+    currents_fetched: str | None = None
 
 
 class TelemetryStatusOut(BaseModel):

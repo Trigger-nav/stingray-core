@@ -63,6 +63,7 @@ import math
 from dataclasses import dataclass
 
 from core.corridors import PORTS, REF_LAT_DEG, Corridor, offset_point
+from core.distill import distill_track
 from core.geography import Geography
 from core.isochrone import arrival_times_within, arrivals_within_horizon
 from core.lattice import Lattice, build_lattice
@@ -201,6 +202,12 @@ class PlanRequest:
     # that deliberately include an overload speed to prove it gets pruned,
     # for instance) bypass the envelope entirely, same as before.
     speeds_kn: tuple[float, ...] | None = None
+    # ticket S1: post-search waypoint distillation (core.distill), on by
+    # default so every existing caller (hosted demo included) sees shorter,
+    # navigator-shaped tracks with zero client changes. False reproduces
+    # the pre-S1, undistilled search output exactly -- the escape hatch a
+    # caller that wants the raw lattice/corridor polyline can reach for.
+    distill: bool = True
 
     def __post_init__(self) -> None:
         _validate_endpoint(self.origin, self.geography, self.origin_is_anchorage, "origin")
@@ -399,9 +406,26 @@ def _heuristic_cost_eur(
     """Admissible lower bound on remaining cost-to-go: fastest possible
     time at max speed, costed at best-case (calm-water, optimal-SFOC) fuel
     rate. Real conditions can only be slower and thirstier — admissible
-    given zero current in the current weather model (A4's v1 boundary
-    condition; a strong following current could in principle beat this,
-    but v1 currents are always zero)."""
+    given zero current, which was true unconditionally through ticket R1
+    (A4's v1 boundary condition).
+
+    **Ticket C1, known limitation, deliberately not fixed here (flagged
+    in review, deferred by design):** for a pack with real currents
+    enabled (the UK pack), a strongly favourable current can make the
+    true achievable ground speed exceed `max_speed_kn`, which can make
+    this heuristic *overestimate* remaining cost — breaking A*
+    admissibility. `_lattice_search` tries the heuristic-guided run
+    first; if it *finds* the destination at all (just not necessarily via
+    the cheapest path), there is no fallback to the exhaustive
+    `use_heuristic=False` run — that only fires when the heuristic-guided
+    run finds nothing. So a strong following tide could in principle
+    yield a real, feasible, silently non-optimal candidate. Not fixed:
+    real UK tidal streams are a smaller fraction of typical 10-16kn
+    cruising speed than would be needed for a large practical effect, and
+    a proper fix means querying the current field *during* heuristic
+    evaluation, which this heuristic deliberately avoids today for
+    speed/simplicity — a real design change, not an ingest-layer one.
+    Named follow-up, not silently ignored."""
     if max_speed_kn <= 0:
         return 0.0
     remaining_nm = m_to_nm(distance_m(current, destination, ref_lat_deg))
@@ -509,7 +533,12 @@ def _lattice_search(
                         depth_exempt_points=depth_exempt_points,
                         ref_lat_deg=lattice.ref_lat_deg,
                     )
-                    if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
+                    if (
+                        not (leg.navigable and leg.depth_ok)
+                        or leg.slam_event
+                        or leg.overload
+                        or leg.current_exceeds_stw
+                    ):
                         continue
                     leg_cost = (
                         weights.fuel_eur_per_kg * leg.fuel_kg
@@ -645,6 +674,10 @@ def _lattice_route_result(
         else 0.0,
         "active_engines": _majority_by_duration(engines_per_leg, duration_per_leg),
         "side": _route_signature(track),
+        # ticket S1: per-leg speed/engine-config, needed by distill_track's
+        # same-speed removal precondition. Not yet consumed by any caller.
+        "stw_ms_per_leg": stw_ms_per_leg,
+        "engines_per_leg": engines_per_leg,
     }
 
 
@@ -704,6 +737,8 @@ def _dp_route(
                     continue
                 if leg.slam_event or leg.overload:  # B5: hard prune, never costed
                     continue
+                if leg.current_exceeds_stw:  # C1: hard prune, never costed
+                    continue
                 cost = (
                     s["cost"]
                     + weights.fuel_eur_per_kg * leg.fuel_kg
@@ -746,6 +781,10 @@ def _dp_route(
         "cost": end["cost"],
         "leg_targets": leg_targets,
         "alteration_list": _build_alteration_list(leg_targets),
+        # ticket S1: a corridor-DP route commands one speed/engine-config
+        # for the whole corridor, so every leg shares it.
+        "stw_ms_per_leg": [stw_ms] * (len(track) - 1),
+        "engines_per_leg": [active_engines] * (len(track) - 1),
     }
 
 
@@ -829,6 +868,90 @@ def _baseline_route(
         leg_targets=result["leg_targets"],
         alteration_list=result["alteration_list"],
     )
+
+
+def _apply_distillation(
+    result: dict,
+    depth_exempt_points: tuple[LatLon, ...],
+    t0_h: float,
+    weather: WeatherField,
+    geography: Geography,
+    twin: VesselTwin,
+    weights: Weights,
+    ref_lat_deg: float,
+) -> dict:
+    """Ticket S1: simplify a search-produced candidate's polyline down to
+    its deliberate waypoints, strictly after `_lattice_route_result`/
+    `_dp_route` have already picked a track and a per-leg speed/engine-
+    config. `core.distill.distill_track` re-verifies every proposed
+    shortcut through the identical `evaluate_leg` the search itself
+    trusts -- see that module's own docstring for the full correctness
+    argument, including why it deliberately never imports `core.optimiser`
+    (this function is the other half of that boundary: `leg_targets`/
+    `alteration_list` are rebuilt here, on the distilled track, via the
+    existing, unmodified `_build_leg_targets`/`_build_alteration_list`).
+
+    Never called on the baseline (`_baseline_route` builds its `Candidate`
+    directly from `_lattice_route_result`, bypassing this function
+    entirely) -- the do-nothing reference must stay exactly what the
+    search itself produced."""
+    distilled = distill_track(
+        result["track"],
+        result["stw_ms_per_leg"],
+        result["engines_per_leg"],
+        t0_h,
+        weather,
+        geography,
+        twin,
+        weights,
+        depth_exempt_points,
+        ref_lat_deg,
+    )
+    leg_targets = _build_leg_targets(
+        distilled["track"], distilled["stw_ms_per_leg"], t0_h, weather, ref_lat_deg
+    )
+    merged = dict(result)
+    merged.update(
+        track=distilled["track"],
+        stw_ms_per_leg=distilled["stw_ms_per_leg"],
+        engines_per_leg=distilled["engines_per_leg"],
+        duration_h=distilled["duration_h"],
+        fuel_kg=distilled["fuel_kg"],
+        comfort_index=distilled["comfort_index"],
+        wear_index=distilled["wear_index"],
+        max_hs_m=distilled["max_hs_m"],
+        distance_nm=distilled["distance_nm"],
+        cost=distilled["cost"],
+        leg_targets=leg_targets,
+        alteration_list=_build_alteration_list(leg_targets),
+    )
+    if "speed_kn" in merged:
+        # Lattice results report the whole passage's average speed
+        # (distance/duration -- there's no single commanded speed for a
+        # multi-speed track); recompute post-distillation so it stays
+        # consistent with the now-simplified track's own numbers. DP-route
+        # results never carry this key -- a corridor commands one fixed
+        # speed for its whole length, unaffected by distillation.
+        merged["speed_kn"] = (
+            distilled["distance_nm"] / distilled["duration_h"]
+            if distilled["duration_h"] > 0
+            else 0.0
+        )
+    if "active_engines" in merged:
+        # Lattice results report the whole passage's majority-by-duration
+        # engine config (`_majority_by_duration`); re-run it on the
+        # distilled per-leg lists for full consistency, though only
+        # quantisation-level time shifts make this likely to change the
+        # pick. DP-route results never carry this key -- a corridor
+        # commands one fixed engine config for its whole length.
+        merged["active_engines"] = _majority_by_duration(
+            distilled["engines_per_leg"], distilled["duration_per_leg"]
+        )
+    # "side" (route signature), when present, is deliberately left as
+    # `_lattice_route_result` computed it from the ORIGINAL track --
+    # distillation only removes now-redundant interior waypoints, it never
+    # changes which side of Corsica the passage runs.
+    return merged
 
 
 def _candidate_from_result(
@@ -970,6 +1093,17 @@ def optimise(request: PlanRequest) -> PlanResult:
         engine_configs,
         request.departure_t0_h,
     )
+    if primary is not None and request.distill:
+        primary = _apply_distillation(
+            primary,
+            (lattice.origin, lattice.destination),
+            request.departure_t0_h,
+            request.weather,
+            request.geography,
+            twin,
+            weights,
+            pack.ref_lat_deg,
+        )
     if primary is not None:
         candidates_all.append(
             _candidate_from_result(
@@ -1016,6 +1150,17 @@ def optimise(request: PlanRequest) -> PlanResult:
                 request.departure_t0_h,
                 lane_filter=opposite_filter,
             )
+            if secondary is not None and request.distill:
+                secondary = _apply_distillation(
+                    secondary,
+                    (lattice.origin, lattice.destination),
+                    request.departure_t0_h,
+                    request.weather,
+                    request.geography,
+                    twin,
+                    weights,
+                    pack.ref_lat_deg,
+                )
             if secondary is not None and secondary["side"] != primary["side"]:
                 candidates_all.append(
                     _candidate_from_result(
@@ -1095,6 +1240,17 @@ def optimise(request: PlanRequest) -> PlanResult:
                 )
                 if result is None:
                     continue
+                if request.distill:
+                    result = _apply_distillation(
+                        result,
+                        (corridor.points[0], corridor.points[-1]),
+                        request.departure_t0_h,
+                        request.weather,
+                        request.geography,
+                        twin,
+                        weights,
+                        pack.ref_lat_deg,
+                    )
                 grid.append(
                     {
                         "corridor": corridor,
@@ -1150,11 +1306,41 @@ def optimise(request: PlanRequest) -> PlanResult:
     picks: list[Candidate] = []
     if pool:
         picks.append(pool[0])
+        # Guarantee every distinct reachable side gets at least one
+        # representative among the top picks (its own cheapest candidate),
+        # before the greedy cost-order fill below claims any remaining
+        # slots. Found necessary via ticket S1: a plain greedy top-3 by
+        # cost is order-sensitive, and distillation's legitimate, uneven
+        # per-side cost improvements (real waypoints removed, real savings
+        # -- but not by the same amount on every route) could silently
+        # drop a real, still-reachable side out of the final picks
+        # entirely, even though the search itself still found it with an
+        # improved cost sitting right there in `pool` -- concretely, the
+        # Bonifacio Strait's E corridor (ticket 0.8) vs its more heavily
+        # simplified W corridor. `pool` is already cost-sorted, so
+        # `next(...)` below is each side's cheapest option.
+        for side in dict.fromkeys(c.side for c in pool):
+            if len(picks) >= 3:
+                break
+            if any(p.side == side for p in picks):
+                continue
+            picks.append(next(c for c in pool if c.side == side))
         for c in pool:
             if len(picks) >= 3:
                 break
+            if any(p is c for p in picks):
+                continue
             if all(p.side != c.side or abs(p.speed_kn - c.speed_kn) >= 2 for p in picks):
                 picks.append(c)
+        # The side-guarantee phase above adds candidates out of `pool`'s
+        # own order (a side's fastest/cheapest representative can land
+        # ahead of an as-yet-unseen same-side candidate that's actually
+        # closer to the front of `pool`) -- re-sort by the same key `pool`
+        # itself used so callers keep seeing the promised presentation
+        # order (fastest-first when `missed_window`, per
+        # `test_impossible_eta_window_flags_and_orders_fastest_first`)
+        # regardless of which phase contributed each pick.
+        picks.sort(key=(lambda c: c.duration_h) if missed_window else (lambda c: c.score_eur))
 
     baseline = _baseline_route(
         lattice,

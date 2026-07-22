@@ -117,11 +117,60 @@ nearby harbour-approach point if not, the same way a real passage would
 route to the fairway, not the quay (`data/region_packs/uk_sw.yaml`'s own
 header has the exact adjustment made and why).
 
-## 6. Assemble the manifest
+## 6. Currents (optional, CMEMS — ticket C1)
+
+`current_u_ms`/`current_v_ms` default to zero (exactly ticket B2's
+original behaviour) unless a pack opts in — worth doing whenever the
+region has current/tidal-stream speeds that are a real fraction of your
+vessel's cruising speed (the UK South-West pack's whole reason for
+existing), not worth the recurring fetch cost otherwise (this repo's own
+Med pack stays off — `docs/plans/ticket-C1.md` §5 has the reasoning).
+
+**One-time setup**: a free Copernicus Marine Service account
+(https://data.marine.copernicus.eu), then set
+`COPERNICUSMARINE_SERVICE_USERNAME`/`COPERNICUSMARINE_SERVICE_PASSWORD`
+(env vars, this repo's preferred form — `deploy/.env.example`) or run
+`copernicusmarine login` once per machine. Same shape as the CDS/
+`~/.cdsapirc` setup ticket B7's ERA5 annotator needs — cannot be
+automated or tested in CI.
+
+**Find the real dataset id for your region** — do not guess or reuse the
+UK South-West pack's id for a different area. `copernicusmarine.describe(dataset_id=...)`
+is unauthenticated and confirms the real variable names/coverage before
+you commit to an id; `docs/plans/ticket-C1.md` §2 has the live-verified
+process (inspecting the product's own STAC metadata,
+`admp_retired_date`, etc.) that found `cmems_mod_nws_phy-cur_anfc_1.5km-2D_PT1H-i`
+for the UK pack.
+
+```
+python3 -m ingest.fetch_currents_cmems --bbox LON_MIN LAT_MIN LON_MAX LAT_MAX \
+  --dataset-id <real dataset id, confirmed via describe()> \
+  --out data/region_packs/<pack>/currents_<pack>.npz \
+  --coastline-path data/region_packs/<pack>/coastline_<pack>.json \
+  --bathymetry-path data/region_packs/<pack>/bathymetry_<pack>.npz \
+  --nogo-path data/region_packs/<pack>/nogo_<pack>.json \
+  --tss-path data/region_packs/<pack>/tss_<pack>.json
+
+python3 -m ingest.merge_currents \
+  --weather-npz data/region_packs/<pack>/weather_<pack>.npz \
+  --currents-npz data/region_packs/<pack>/currents_<pack>.npz \
+  --pack-id <pack>
+```
+
+Ordering matters: step 4's weather fetch must already have written
+`weather_<pack>.npz` before this runs — `merge_currents.py` rewrites that
+file in place, current fields only, everything else untouched. Set
+`currents_dataset_id` in the pack's manifest (step 7) to have
+`ingest/fetch_all_packs.py`'s cron orchestration run both of these
+automatically every cycle — a currents-step failure there is isolated
+from the wind/wave fetch (logged at `WARNING`, doesn't block that pack's
+weather from staying fresh).
+
+## 7. Assemble the manifest
 
 Write `data/region_packs/<pack>.yaml` (see `data/region_packs/uk_sw.yaml`
 or `data/region_packs/med.yaml` for the exact schema — `RegionPack.from_yaml`,
-`core/regionpack.py`), pointing at every file from steps 2-5, with
+`core/regionpack.py`), pointing at every file from steps 2-6, with
 `default_origin`/`default_destination` set to a verified-navigable pair
 (step 5's caveat). Lattice search knobs (`lane_turn_rate_nm`,
 `min_navigable_edge_fraction`, `min_refinement_step_nm`) default to the
@@ -129,13 +178,15 @@ Med's own tuned values if omitted — there's no principled reason to
 assume those are right for a different coastline's degradation profile,
 but no invented region-specific number either; start from the defaults
 and treat any resulting search infeasibility as a real finding to
-investigate, not something to silently tune away.
+investigate, not something to silently tune away. `currents_dataset_id`
+(step 6) defaults to unset — omit it entirely for a pack that doesn't
+model currents.
 
 Add the new manifest's path to your deployment's `data/region_packs.yaml`
 (or the committed example, if this pack should ship by default) so
 `Settings.region_packs_path`-configured instances pick it up.
 
-## 7. Validate
+## 8. Validate
 
 Run `optimise()` end-to-end against the new pack with a real
 origin/destination inside it and confirm a feasible plan — the concrete

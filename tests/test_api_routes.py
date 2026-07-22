@@ -73,6 +73,17 @@ def test_health_reports_role_and_schema_version(client):
     assert body["schema_version"]
 
 
+def test_health_currents_provenance_is_null_when_not_modelled(client):
+    # ticket C1: the default (Med, single-pack) test client's committed
+    # weather npz has no currents provenance -- must read null, not be
+    # missing/error, and must not be confused with "modelled but zero".
+    r = client.get("/v1/health", auth=AUTH)
+    body = r.json()
+    assert body["currents_source"] is None
+    assert body["currents_cycle"] is None
+    assert body["currents_fetched"] is None
+
+
 def test_vessel_returns_the_loaded_default_spec(client):
     r = client.get("/v1/vessel", auth=AUTH)
     assert r.status_code == 200
@@ -159,3 +170,55 @@ def test_weather_field_quantizes_h_to_the_nearest_hour(client):
     b = client.get("/v1/weather/field?h=3.4", auth=AUTH)
     assert a.json()["valid_time_h"] == b.json()["valid_time_h"] == 3.0
     assert a.headers["etag"] == b.headers["etag"]
+
+
+def test_submit_plan_distill_false_round_trips_to_undistilled_result(client):
+    """Ticket S1's required amendment: `distill: false` in the request
+    body must reach `optimise()` as a real `PlanRequest(..., distill=False)`
+    -- proven end to end through the real API surface, not just the
+    schema-parity field-name mirror. Deliberately does *not* use this
+    module's short-route convention (`_submit_short_route`'s
+    (43.0,7.9)->(42.8,8.1) pair) -- verified directly against
+    `core.optimiser.optimise()` that it already collapses to a minimal
+    3-waypoint track regardless of `distill`, so it can't discriminate
+    on/off. The default Antibes<->Porto Cervo passage (this API's own
+    default origin/destination when omitted) has real removable kinks
+    (15 waypoints undistilled vs 6 distilled, at `speeds_kn=[12.0]` --
+    measured directly), so it's the pair actually exercised here; a single
+    fixed speed keeps the corridor-DP grid small enough to stay fast."""
+    body = {"pace": 50, "comfort": 50, "speeds_kn": [12.0], "distill": False}
+    submitted = client.post("/v1/plans", json=body, auth=AUTH)
+    assert submitted.status_code == 202
+    r = _poll_until_finished(client, submitted.json()["job_id"], timeout_s=30.0)
+    result = r.json()["result"]
+    assert result is not None
+    api_wp_counts = sorted(len(c["track"]) for c in result["candidates"])
+
+    from core.geography import RealGeography
+    from core.optimiser import DEFAULT_DESTINATION, DEFAULT_ORIGIN, PlanRequest, optimise
+    from core.vessel_spec import VesselSpec
+    from core.weather import GriddedWeatherField
+
+    vessel = VesselSpec.from_yaml("data/vessel_specs/mys_50m_default.yaml")
+    geo = RealGeography()
+    wx = GriddedWeatherField.from_npz("data/weather/ecmwf_western_med.npz")
+    common = dict(
+        weather=wx,
+        geography=geo,
+        vessel=vessel,
+        pace=50,
+        comfort=50,
+        origin=DEFAULT_ORIGIN,
+        destination=DEFAULT_DESTINATION,
+        speeds_kn=(12.0,),
+    )
+    direct_undistilled = optimise(PlanRequest(**common, distill=False))
+    direct_distilled = optimise(PlanRequest(**common, distill=True))
+
+    # The real round-trip: the API's distill=False result matches a direct,
+    # genuinely-undistilled optimise() call...
+    assert api_wp_counts == sorted(len(c.track) for c in direct_undistilled.candidates)
+    # ...and, the discriminating check, differs from a distilled one --
+    # proving distill=False actually suppressed distillation rather than
+    # both paths coincidentally producing the same (already-minimal) track.
+    assert api_wp_counts != sorted(len(c.track) for c in direct_distilled.candidates)

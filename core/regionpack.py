@@ -78,6 +78,13 @@ class RegionPack:
     # YAML can't hold a function literal, and this is also what
     # `data/region_packs/*.yaml` stores on disk.
     legacy_corridors: tuple[tuple[LatLon, LatLon, str], ...] = ()
+    # Ticket C1: None (default, every pack including "med") -> currents
+    # stay at exactly zero, current_u_ms/current_v_ms's original ticket
+    # B2 behaviour, unchanged. Set to a real CMEMS dataset_id (see
+    # ingest/fetch_currents_cmems.py's module docstring for the verified
+    # real ids) to opt a pack into ingest/fetch_all_packs.py's per-pack
+    # currents fetch+merge step.
+    currents_dataset_id: str | None = None
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> RegionPack:
@@ -120,6 +127,7 @@ class RegionPack:
                 "min_refinement_step_nm", DEFAULT_MIN_REFINEMENT_STEP_NM
             ),
             legacy_corridors=legacy_corridors,
+            currents_dataset_id=raw.get("currents_dataset_id"),
         )
 
 

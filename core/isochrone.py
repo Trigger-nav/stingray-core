@@ -65,7 +65,12 @@ def _best_feasible_duration_h(
                 depth_exempt_points=depth_exempt_points,
                 ref_lat_deg=ref_lat_deg,
             )
-            if not (leg.navigable and leg.depth_ok) or leg.slam_event or leg.overload:
+            if (
+                not (leg.navigable and leg.depth_ok)
+                or leg.slam_event
+                or leg.overload
+                or leg.current_exceeds_stw
+            ):
                 continue
             if best is None or leg.duration_h < best:
                 best = leg.duration_h

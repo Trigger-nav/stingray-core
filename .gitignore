@@ -39,3 +39,9 @@ data/historical/*/
 # is absent -- run docs/region-pack-runbook.md's weather step to
 # regenerate it locally.
 data/region_packs/*/weather_*.npz
+
+# ticket C1: the intermediate CMEMS currents-only npz
+# (data/region_packs/<pack>/currents_<pack>.npz, ingest/fetch_currents_cmems.py)
+# is merged into weather_*.npz above and not itself a source of truth --
+# same staleness reasoning, regenerate via docs/region-pack-runbook.md §6.
+data/region_packs/*/currents_*.npz

@@ -129,6 +129,7 @@ def plan_request_from_in(
         latest_arrival_h=body.latest_arrival_h,
         departure_t0_h=body.departure_t0_h,
         speeds_kn=tuple(body.speeds_kn) if body.speeds_kn is not None else None,
+        distill=body.distill,
     )
 
 

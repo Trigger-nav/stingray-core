@@ -53,6 +53,7 @@ def _short_payload(**overrides) -> PlanJobPayload:
         departure_t0_h=0.0,
         speeds_kn=(12.0,),
         vessel_override=None,
+        distill=True,
     )
     defaults.update(overrides)
     return PlanJobPayload(**defaults)

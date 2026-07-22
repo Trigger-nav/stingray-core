@@ -93,3 +93,9 @@ lane_turn_rate_nm: 15.0
 min_navigable_edge_fraction: 0.75
 min_refinement_step_nm: 0.5
 legacy_corridors: []
+# Ticket C1: real surface currents, tidal-stream signal included -- this
+# pack's whole reason for existing (CTV-class Channel routing is
+# genuinely tide-dominated). Real dataset id, verified live not
+# superseded (docs/plans/ticket-C1.md Sec 2): NWSHELF_ANALYSISFORECAST_PHY_004_013,
+# hourly, 2D surface, 1.5km, admp_retired_date null as of 2026-07-20.
+currents_dataset_id: cmems_mod_nws_phy-cur_anfc_1.5km-2D_PT1H-i

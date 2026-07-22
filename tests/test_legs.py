@@ -1,6 +1,8 @@
+import dataclasses
+
 import pytest
 
-from core.legs import DEPTH_EXEMPT_RADIUS_NM, _leg_depth_ok, evaluate_leg
+from core.legs import DEPTH_EXEMPT_RADIUS_NM, _leg_depth_ok, evaluate_leg, leg_navigation
 from core.twin import VesselTwin
 from core.units import LatLon, kn_to_ms
 from core.vessel_spec import VesselSpec
@@ -48,6 +50,25 @@ def twin(vessel):
 @pytest.fixture
 def calm():
     return SyntheticWeatherField("calm")
+
+
+class _ConstantCurrentWeatherField:
+    """Wraps `SyntheticWeatherField("calm")`, overriding only
+    `current_u_ms`/`current_v_ms` to a fixed, known test value -- ticket
+    C1: lets these tests exercise the current-triangle math with a real,
+    controllable current without a full `GriddedWeatherField` npz
+    round-trip."""
+
+    def __init__(self, current_u_ms: float, current_v_ms: float):
+        self._inner = SyntheticWeatherField("calm")
+        self._current_u_ms = current_u_ms
+        self._current_v_ms = current_v_ms
+
+    def sample(self, lat_deg, lon_deg, t_h):
+        s = self._inner.sample(lat_deg, lon_deg, t_h)
+        return dataclasses.replace(
+            s, current_u_ms=self._current_u_ms, current_v_ms=self._current_v_ms
+        )
 
 
 def test_deep_leg_is_depth_ok():
@@ -137,3 +158,62 @@ def test_evaluate_leg_depth_exempt_points_reach_shallow_endpoint(twin, calm):
         depth_exempt_points=(approach,),
     )
     assert exempt.depth_ok is True
+
+
+# --- Ticket C1: current-exceeds-STW hard constraint --------------------
+
+
+def test_leg_navigation_current_exceeding_stw_is_flagged_not_raised():
+    # p -> q runs due east (~90 deg bearing); a due-north current is pure
+    # cross-track for this leg. 10kn cross-current vs. a 6kn STW candidate
+    # -- before ticket C1 this raised ValueError uncaught out of
+    # leg_navigation; now it must be caught and flagged instead.
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    strong_cross_current = _ConstantCurrentWeatherField(
+        current_u_ms=0.0, current_v_ms=kn_to_ms(10)
+    )
+    nav = leg_navigation(p, q, kn_to_ms(6), 0.0, strong_cross_current)
+    assert nav.current_exceeds_stw is True
+    assert nav.duration_h == float("inf")
+
+
+def test_leg_navigation_weak_cross_current_is_not_flagged():
+    # a cross-current well within STW must resolve normally, not flag.
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    weak_cross_current = _ConstantCurrentWeatherField(current_u_ms=0.0, current_v_ms=kn_to_ms(2))
+    nav = leg_navigation(p, q, kn_to_ms(12), 0.0, weak_cross_current)
+    assert nav.current_exceeds_stw is False
+    assert nav.duration_h < float("inf")
+
+
+def test_leg_navigation_strong_following_current_speeds_up_without_flagging():
+    # a strong ALONG-track (following) current is physically fine
+    # regardless of magnitude relative to STW -- only the cross-track
+    # component can exceed STW. Must not be flagged, and must measurably
+    # reduce duration_h vs. a zero-current baseline.
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)  # due east
+    stw_ms = kn_to_ms(10)
+    following_current = _ConstantCurrentWeatherField(current_u_ms=kn_to_ms(10), current_v_ms=0.0)
+    zero_current = SyntheticWeatherField("calm")
+
+    nav_following = leg_navigation(p, q, stw_ms, 0.0, following_current)
+    nav_zero = leg_navigation(p, q, stw_ms, 0.0, zero_current)
+
+    assert nav_following.current_exceeds_stw is False
+    assert nav_following.duration_h < nav_zero.duration_h
+
+
+def test_evaluate_leg_current_exceeds_stw_prunes_leg_without_crashing(twin):
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    deep = _StubGeography(depth_m=100.0)
+    strong_cross_current = _ConstantCurrentWeatherField(
+        current_u_ms=0.0, current_v_ms=kn_to_ms(10)
+    )
+    result = evaluate_leg(
+        p, q, kn_to_ms(6), 0.0, strong_cross_current, deep, twin, active_engines=2
+    )
+    assert result.current_exceeds_stw is True
+    # every other hard-constraint flag is independent -- this isn't a
+    # land/depth/wear-policy prune, just current-exceeds-STW.
+    assert result.navigable is True
+    assert result.depth_ok is True

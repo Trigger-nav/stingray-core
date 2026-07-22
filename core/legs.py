@@ -64,6 +64,7 @@ class LegResult:
     depth_ok: bool
     slam_event: bool
     overload: bool
+    current_exceeds_stw: bool = False
 
 
 @dataclass
@@ -72,6 +73,7 @@ class LegNavigation:
     cts_deg: float
     duration_h: float
     weather_sample: WeatherSample
+    current_exceeds_stw: bool = False
 
 
 def leg_navigation(
@@ -86,7 +88,25 @@ def leg_navigation(
     both for leg costing (`evaluate_leg`) and for building execution
     setpoints (`core/optimiser.py`'s `_build_leg_targets`), so the
     current-triangle math and weather-time sampling happen in exactly one
-    place."""
+    place.
+
+    Ticket C1: `resolve_ground_speed_ms`/`resolve_course_to_steer_deg`
+    (`core/units.py`) raise `ValueError` when the current's cross-track
+    component exceeds `stw_ms` -- physically correct (the vessel can't
+    hold the track at all), but unreachable with the zero-current field
+    every fetcher wrote before this ticket, so nothing ever needed to
+    catch it. Real tidal streams (the UK pack) can genuinely exceed the
+    candidate speed grid's floor. Caught here, once, in the one shared
+    place this computation happens (matching this module's own stated
+    design principle) rather than at either of `leg_navigation`'s two
+    call sites -- represented as `current_exceeds_stw=True` plus a
+    `duration_h=inf` fallback, the same shape `ground_speed_ms <= 0`
+    already used below, so every existing caller's "infeasible leg"
+    handling picks this up automatically. `course_deg`/`cts_deg` fall
+    back to the plain through-water track bearing (the zero-current
+    answer) in this case -- only ever observable for a leg the search
+    already prunes (`evaluate_leg`/`LegResult.current_exceeds_stw`), not
+    a route any candidate actually contains."""
     leg_distance_m = distance_m(p, q, ref_lat_deg)
     course_deg = bearing_deg(p, q, ref_lat_deg)
     mid = interpolate_point(p, q, 0.5)
@@ -95,8 +115,19 @@ def leg_navigation(
     mid_t_h = t0_h + approx_duration_h / 2
     w = weather.sample(mid.lat_deg, mid.lon_deg, mid_t_h)
 
-    ground_speed_ms = resolve_ground_speed_ms(stw_ms, course_deg, w.current_u_ms, w.current_v_ms)
-    cts_deg = resolve_course_to_steer_deg(stw_ms, course_deg, w.current_u_ms, w.current_v_ms)
+    try:
+        ground_speed_ms = resolve_ground_speed_ms(
+            stw_ms, course_deg, w.current_u_ms, w.current_v_ms
+        )
+        cts_deg = resolve_course_to_steer_deg(stw_ms, course_deg, w.current_u_ms, w.current_v_ms)
+    except ValueError:
+        return LegNavigation(
+            course_deg=course_deg,
+            cts_deg=course_deg,
+            duration_h=float("inf"),
+            weather_sample=w,
+            current_exceeds_stw=True,
+        )
     duration_h = (
         m_to_nm(leg_distance_m) / ms_to_kn(ground_speed_ms) if ground_speed_ms > 0 else float("inf")
     )
@@ -211,4 +242,5 @@ def evaluate_leg(
         depth_ok=depth_ok,
         slam_event=wear_result.slam_event,
         overload=wear_result.overload,
+        current_exceeds_stw=nav.current_exceeds_stw,
     )

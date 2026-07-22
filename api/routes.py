@@ -100,6 +100,7 @@ def submit_plan(
         departure_t0_h=body.departure_t0_h,
         speeds_kn=tuple(body.speeds_kn) if body.speeds_kn is not None else None,
         vessel_override=vessel_spec_from_model(body.vessel) if body.vessel is not None else None,
+        distill=body.distill,
     )
     record = job_store.submit(payload)
     return JobSubmittedOut(job_id=record.job_id, status=record.status)
@@ -128,10 +129,12 @@ def get_plan(job_id: str, job_store: JobStoreDep) -> JobRecordOut:
 @router.get("/health", response_model=HealthOut)
 def health(app_state: AppStateDep) -> HealthOut:
     """Ticket R1: reports provenance for one representative pack ("med" if
-    configured, else the first configured pack) -- HealthOut's schema is
-    unchanged (no new fields), so this stays a single-pack-shaped summary
-    rather than growing a per-pack breakdown; a fuller per-pack health
-    view is a reasonable follow-up, not required for this ticket."""
+    configured, else the first configured pack) -- a single-pack-shaped
+    summary rather than growing a per-pack breakdown; a fuller per-pack
+    health view is a reasonable follow-up, not required for this ticket.
+    Ticket C1: also reports that pack's currents provenance
+    (`GriddedWeatherField.current_source`/etc, all `None` for a pack that
+    never enabled currents -- see that class's own docstring)."""
     pack_id = _default_pack_id(app_state.region_packs)
     weather = app_state.weather[pack_id]
     return HealthOut(
@@ -141,6 +144,9 @@ def health(app_state: AppStateDep) -> HealthOut:
         weather_source=weather.source,
         weather_cycle=weather.cycle,
         weather_fetched=weather.fetched,
+        currents_source=weather.current_source,
+        currents_cycle=weather.current_cycle,
+        currents_fetched=weather.current_fetched,
     )
 
 

@@ -331,6 +331,20 @@ vessel-role pull side (`api/weather_sync.py`, which itself only ever
 pulls the pack(s) *that vessel's own* `region_packs.yaml` configures it
 to care about, not every pack the cloud role happens to serve).
 
+**Real surface currents (ticket C1):** no extra cron line needed --
+`ingest.fetch_all_packs` already runs a currents fetch+merge step
+automatically for any pack whose manifest sets `currents_dataset_id`
+(the UK South-West pack; the Med pack deliberately doesn't, see
+`docs/plans/ticket-C1.md` §5), right after that pack's own wind/wave
+fetch. Requires `COPERNICUSMARINE_SERVICE_USERNAME`/
+`COPERNICUSMARINE_SERVICE_PASSWORD` in the environment (`deploy/.env.example`)
+-- a free Copernicus Marine Service account, same one-time setup shape as
+the CDS credentials ticket B7's ERA5 annotator needs. A currents-step
+failure (CMEMS outage, quota, etc.) is isolated from that pack's own
+wind/wave fetch -- logged at `WARNING` in the same cron log, wind/wave
+still publishes on schedule regardless, currents just holds its previous
+value until the next successful cycle.
+
 ### 8. TLS (Caddy)
 
 ```

@@ -206,6 +206,7 @@ class PlanJobPayload:
     departure_t0_h: float
     speeds_kn: tuple[float, ...] | None
     vessel_override: VesselSpec | None
+    distill: bool
 
 
 def run_plan_job(payload: PlanJobPayload) -> PlanResult:
@@ -244,6 +245,7 @@ def run_plan_job(payload: PlanJobPayload) -> PlanResult:
         latest_arrival_h=payload.latest_arrival_h,
         departure_t0_h=payload.departure_t0_h,
         speeds_kn=payload.speeds_kn,
+        distill=payload.distill,
     )
     return optimise(request)
 
