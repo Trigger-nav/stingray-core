@@ -239,6 +239,12 @@ class HealthOut(BaseModel):
     currents_source: str | None = None
     currents_cycle: str | None = None
     currents_fetched: str | None = None
+    # Ticket W1: how many wave/current cells this pack's own ingest
+    # filled from a nearby real ocean cell (coastal fill) -- None (not 0)
+    # for an npz written before this ticket, or a field group the pack
+    # never fetches (e.g. Med currents).
+    wave_filled_cells: int | None = None
+    current_filled_cells: int | None = None
 
 
 class TelemetryStatusOut(BaseModel):

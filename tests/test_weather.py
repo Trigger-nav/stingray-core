@@ -448,3 +448,71 @@ def test_gridded_weather_field_from_npz_round_trips_current_provenance(tmp_path)
     assert field.current_source == "cmems_mod_nws_phy-cur_anfc_1.5km-2D_PT1H-i"
     assert field.current_cycle == "20260707_cmems"
     assert field.current_fetched == "2026-07-07T01:00:00+00:00"
+
+
+def test_gridded_weather_field_from_npz_tolerates_pre_w1_schema_missing_fill_counts(tmp_path):
+    """Ticket W1: an npz written before this ticket has no
+    wave_filled_cells/current_filled_cells at all -- from_npz must load
+    it as "not modelled" (None), not raise KeyError. Deliberately
+    identical fixture shape to the pre-C1 tolerance test above."""
+    nlat, nlon = 2, 2
+    grid = _uniform_grid(1, nlat, nlon, 1.0)
+    zeros = _uniform_grid(1, nlat, nlon, 0.0)
+    npz_path = tmp_path / "pre_w1.npz"
+    with open(npz_path, "wb") as f:
+        np.savez_compressed(
+            f,
+            lat0=41.0,
+            dlat=1.0,
+            lon0=8.0,
+            dlon=1.0,
+            hours=np.array([0.0]),
+            hs_m=grid,
+            period_peak_s=grid,
+            period_mean_s=grid,
+            wave_from_deg=zeros,
+            wind_u_ms=zeros,
+            wind_v_ms=zeros,
+            current_u_ms=zeros,
+            current_v_ms=zeros,
+            cycle="20260707_00z",
+            fetched="2026-07-07T00:12:00+00:00",
+            source="test fixture",
+            # deliberately no wave_filled_cells/current_filled_cells
+        )
+
+    field = GriddedWeatherField.from_npz(npz_path)
+    assert field.wave_filled_cells is None
+    assert field.current_filled_cells is None
+
+
+def test_gridded_weather_field_from_npz_round_trips_fill_counts(tmp_path):
+    nlat, nlon = 2, 2
+    grid = _uniform_grid(1, nlat, nlon, 1.0)
+    npz_path = tmp_path / "post_w1.npz"
+    with open(npz_path, "wb") as f:
+        np.savez_compressed(
+            f,
+            lat0=41.0,
+            dlat=1.0,
+            lon0=8.0,
+            dlon=1.0,
+            hours=np.array([0.0]),
+            hs_m=grid,
+            period_peak_s=grid,
+            period_mean_s=grid,
+            wave_from_deg=grid,
+            wind_u_ms=grid,
+            wind_v_ms=grid,
+            current_u_ms=grid,
+            current_v_ms=grid,
+            cycle="20260707_00z",
+            fetched="2026-07-07T00:12:00+00:00",
+            source="nomads",
+            wave_filled_cells=18,
+            current_filled_cells=3,
+        )
+
+    field = GriddedWeatherField.from_npz(npz_path)
+    assert field.wave_filled_cells == 18
+    assert field.current_filled_cells == 3

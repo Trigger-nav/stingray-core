@@ -86,6 +86,8 @@ from core.geography import RealGeography
 from core.track import TrackPoint, covering_bbox, covering_time_range_s
 from core.weather import GriddedWeatherField
 from ingest.grib_common import (
+    apply_coastal_fill,
+    coastal_fill_mask,
     direction_to_from_convention_deg,
     mask_land_as_missing,
     normalise_and_sort_dataset,
@@ -295,6 +297,23 @@ def build_grid_from_netcdf(
     period_mean_s = mask_land_as_missing(period_mean_s, lats, lons, geography)
     wave_from_deg = mask_land_as_missing(wave_from_deg, lats, lons, geography)
 
+    # Ticket W1: coastal fill, same shared geometry as fetch_grib_ecmwf.py/
+    # fetch_grib_nomads.py.
+    ref_lat_deg = float(np.mean(lats))
+    fill_mask = coastal_fill_mask(lats, lons, geography)
+    hs_m, wave_filled_cells, _ = apply_coastal_fill(
+        hs_m, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="hs_m"
+    )
+    period_peak_s, _, _ = apply_coastal_fill(
+        period_peak_s, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="period_peak_s"
+    )
+    period_mean_s, _, _ = apply_coastal_fill(
+        period_mean_s, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="period_mean_s"
+    )
+    wave_from_deg, _, _ = apply_coastal_fill(
+        wave_from_deg, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="wave_from_deg"
+    )
+
     n_hours = len(hours)
     zeros = np.zeros((n_hours, len(lats), len(lons)))
 
@@ -313,6 +332,7 @@ def build_grid_from_netcdf(
         current_u_ms=zeros,
         current_v_ms=zeros,
         source="ERA5 reanalysis (CDS reanalysis-era5-single-levels)",
+        wave_filled_cells=wave_filled_cells,
     )
 
 

@@ -84,6 +84,15 @@ def test_health_currents_provenance_is_null_when_not_modelled(client):
     assert body["currents_fetched"] is None
 
 
+def test_health_coastal_fill_counts_are_null_for_a_pre_w1_npz(client):
+    # ticket W1: the committed Med test npz predates coastal fill --
+    # must read null (not modelled/not present), not 0 or a KeyError.
+    r = client.get("/v1/health", auth=AUTH)
+    body = r.json()
+    assert body["wave_filled_cells"] is None
+    assert body["current_filled_cells"] is None
+
+
 def test_vessel_returns_the_loaded_default_spec(client):
     r = client.get("/v1/vessel", auth=AUTH)
     assert r.status_code == 200

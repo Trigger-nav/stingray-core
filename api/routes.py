@@ -147,6 +147,8 @@ def health(app_state: AppStateDep) -> HealthOut:
         currents_source=weather.current_source,
         currents_cycle=weather.current_cycle,
         currents_fetched=weather.current_fetched,
+        wave_filled_cells=weather.wave_filled_cells,
+        current_filled_cells=weather.current_filled_cells,
     )
 
 

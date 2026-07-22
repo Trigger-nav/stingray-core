@@ -64,6 +64,8 @@ import xarray as xr
 from core.geography import OPERATING_AREA_BBOX, RealGeography
 from core.optimiser import DEFAULT_HORIZON_H
 from ingest.grib_common import (
+    apply_coastal_fill,
+    coastal_fill_mask,
     fetch_with_cycle_fallback,
     latest_available_cycle_utc,
     mask_land_as_missing,
@@ -179,6 +181,23 @@ def build_grid(
     # direction_to_from_convention_deg flip needed here (see module docstring).
     wave_from_deg = mask_land_as_missing(np.stack(frames["dir_deg"]), lats, lons, geography)
 
+    # Ticket W1: coastal fill -- geometry computed once, reused across
+    # every wave field sharing this grid.
+    ref_lat_deg = float(np.mean(lats))
+    fill_mask = coastal_fill_mask(lats, lons, geography)
+    hs_m, wave_filled_cells, _ = apply_coastal_fill(
+        hs_m, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="hs_m"
+    )
+    period_peak_s, _, _ = apply_coastal_fill(
+        period_peak_s, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="period_peak_s"
+    )
+    period_mean_s, _, _ = apply_coastal_fill(
+        period_mean_s, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="period_mean_s"
+    )
+    wave_from_deg, _, _ = apply_coastal_fill(
+        wave_from_deg, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="wave_from_deg"
+    )
+
     n_hours = len(steps)
     zeros = np.zeros((n_hours, len(lats), len(lons)))
 
@@ -196,6 +215,7 @@ def build_grid(
         "wind_v_ms": np.stack(frames["v10_ms"]),
         "current_u_ms": zeros,
         "current_v_ms": zeros,
+        "wave_filled_cells": wave_filled_cells,
     }
 
 

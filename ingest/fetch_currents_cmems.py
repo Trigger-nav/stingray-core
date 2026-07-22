@@ -63,7 +63,12 @@ import numpy as np
 import xarray as xr
 
 from core.geography import RealGeography
-from ingest.grib_common import mask_land_as_missing, write_npz_atomic
+from ingest.grib_common import (
+    apply_coastal_fill,
+    coastal_fill_mask,
+    mask_land_as_missing,
+    write_npz_atomic,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -145,6 +150,18 @@ def _grid_from_dataset(ds: xr.Dataset, geography: RealGeography) -> dict:
     current_u = mask_land_as_missing(uo, lats, lons, geography)
     current_v = mask_land_as_missing(vo, lats, lons, geography)
 
+    # Ticket W1: same shared coastal-fill geometry as the wave fetchers.
+    current_filled_cells = 0
+    if len(lats) > 1 and len(lons) > 1:
+        ref_lat_deg = float(np.mean(lats))
+        fill_mask = coastal_fill_mask(lats, lons, geography)
+        current_u, current_filled_cells, _ = apply_coastal_fill(
+            current_u, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="current_u"
+        )
+        current_v, _, _ = apply_coastal_fill(
+            current_v, lats, lons, fill_mask, ref_lat_deg=ref_lat_deg, field_name="current_v"
+        )
+
     return {
         "lat0": float(lats[0]),
         "dlat": float(lats[1] - lats[0]) if len(lats) > 1 else 0.0,
@@ -153,6 +170,7 @@ def _grid_from_dataset(ds: xr.Dataset, geography: RealGeography) -> dict:
         "times": times_epoch,
         "current_u_ms": current_u,
         "current_v_ms": current_v,
+        "current_filled_cells": current_filled_cells,
     }
 
 
@@ -205,6 +223,7 @@ def main() -> None:
         times=grid["times"],
         current_u_ms=grid["current_u_ms"],
         current_v_ms=grid["current_v_ms"],
+        current_filled_cells=grid["current_filled_cells"],
         fetched=now_utc.isoformat(),
         source=args.dataset_id,
     )

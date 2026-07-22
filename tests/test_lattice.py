@@ -5,6 +5,8 @@ import pytest
 from core.corridors import PORTS, corridor_east, corridor_west
 from core.geography import OPERATING_AREA_BBOX, RealGeography
 from core.lattice import (
+    ALONG_TRACK_STEP_FRACTION,
+    DEFAULT_ALONG_TRACK_STEP_NM,
     DEFAULT_CROSS_TRACK_STEP_NM,
     DEFAULT_MIN_REFINEMENT_STEP_NM,
     LANE_TURN_RATE_NM,
@@ -13,6 +15,8 @@ from core.lattice import (
     _turn_range,
     build_lattice,
 )
+from core.regionpack import RegionPack
+from core.units import LatLon, distance_m, m_to_nm
 
 
 @pytest.fixture(scope="module")
@@ -78,6 +82,57 @@ def test_uniform_step_when_no_geography_given(lattice):
     # the pre-0.8 default: no adaptive refinement without a Geography.
     assert all(s == DEFAULT_CROSS_TRACK_STEP_NM for s in lattice.cross_track_step_nm)
     assert lattice.refinement_diagnostics == ()
+
+
+def test_along_track_step_derives_and_floors_exactly_to_default_on_the_med_passage():
+    """Ticket L2 §2a: ALONG_TRACK_STEP_FRACTION reduces bit-exactly to
+    DEFAULT_ALONG_TRACK_STEP_NM on the Med's own real ~179.5508nm passage
+    -- direct algebra, independent of build_lattice, plus a build_lattice
+    cross-check that leaving along_track_step_nm unset produces byte-
+    identical stage_centres to passing the literal default explicitly."""
+    med_nm = m_to_nm(distance_m(PORTS["antibes"], PORTS["portocervo"], REF_LAT_DEG))
+    derived = max(DEFAULT_ALONG_TRACK_STEP_NM, med_nm * ALONG_TRACK_STEP_FRACTION)
+    assert derived == DEFAULT_ALONG_TRACK_STEP_NM
+
+    implicit = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    explicit = build_lattice(
+        PORTS["antibes"], PORTS["portocervo"], along_track_step_nm=DEFAULT_ALONG_TRACK_STEP_NM
+    )
+    assert implicit.stage_centres == explicit.stage_centres
+
+
+def test_along_track_step_derives_and_floors_exactly_to_default_on_the_uk_passage():
+    """Same proof for the UK pack: the formula's own unfloored output
+    (~1.228nm) sits squarely in ticket L2's own found-infeasible zone --
+    the floor is what keeps the shipped UK pack at exactly today's
+    working 6.0nm value, not a silent regression."""
+    pack = RegionPack.from_yaml("data/region_packs/uk_sw.yaml")
+    uk_nm = m_to_nm(
+        distance_m(pack.default_origin, pack.default_destination, pack.ref_lat_deg)
+    )
+    unfloored = uk_nm * ALONG_TRACK_STEP_FRACTION
+    assert unfloored < DEFAULT_ALONG_TRACK_STEP_NM  # would be infeasible if not floored
+    derived = max(DEFAULT_ALONG_TRACK_STEP_NM, unfloored)
+    assert derived == DEFAULT_ALONG_TRACK_STEP_NM
+
+
+def test_along_track_step_coarsens_for_a_passage_much_longer_than_the_med():
+    """A ~360nm passage (2x the Med reference length) should derive a
+    coarser-than-default along_track_step_nm, keeping n_stages roughly
+    constant relative to the Med rather than growing linearly the way a
+    fixed 6.0nm step would -- the real, if narrow, behaviour change this
+    ticket makes (docs/plans/ticket-L2.md §4)."""
+    a, b = LatLon(40.0, 8.0), LatLon(46.0, 8.0)
+    long_nm = m_to_nm(distance_m(a, b, REF_LAT_DEG))
+    assert long_nm == pytest.approx(360.0, abs=0.5)
+
+    derived_lattice = build_lattice(a, b)
+    fixed_lattice = build_lattice(a, b, along_track_step_nm=DEFAULT_ALONG_TRACK_STEP_NM)
+    # Derived spacing is coarser -> fewer stages than the fixed default would give.
+    assert derived_lattice.n_stages < fixed_lattice.n_stages
+    # Roughly halved (2x passage length -> ~2x step -> ~half the stages),
+    # not merely "fewer" -- the real numbers found during planning: 31 vs 61.
+    assert derived_lattice.n_stages == pytest.approx(fixed_lattice.n_stages / 2, rel=0.1)
 
 
 def test_adaptive_refinement_off_switch_leaves_step_uniform():

@@ -176,6 +176,8 @@ class GriddedWeatherField:
         current_cycle: str | None = None,
         current_fetched: str | None = None,
         current_source: str | None = None,
+        wave_filled_cells: int | None = None,
+        current_filled_cells: int | None = None,
     ) -> None:
         self._lat0, self._dlat = lat0_deg, dlat_deg
         self._lon0, self._dlon = lon0_deg, dlon_deg
@@ -205,6 +207,15 @@ class GriddedWeatherField:
         self.current_cycle = current_cycle
         self.current_fetched = current_fetched
         self.current_source = current_source
+        # Ticket W1: how many wave/current cells this npz's own ingest
+        # filled from a nearby real ocean cell (coastal-fill, see
+        # ingest.grib_common.coastal_fill_mask/apply_coastal_fill) --
+        # None (not 0) for an npz written before this ticket, or a field
+        # group a pack never fetches (Med currents) -- the same "not
+        # modelled, not indistinguishable from modelled-and-zero" signal
+        # current_source already established.
+        self.wave_filled_cells = wave_filled_cells
+        self.current_filled_cells = current_filled_cells
 
     @classmethod
     def from_npz(cls, path: str | Path) -> GriddedWeatherField:
@@ -240,6 +251,14 @@ class GriddedWeatherField:
             current_cycle=str(grid["current_cycle"]) if "current_cycle" in grid else None,
             current_fetched=str(grid["current_fetched"]) if "current_fetched" in grid else None,
             current_source=str(grid["current_source"]) if "current_source" in grid else None,
+            # Ticket W1: same defensive `in grid` pattern -- an npz
+            # written before this ticket has neither key.
+            wave_filled_cells=(
+                int(grid["wave_filled_cells"]) if "wave_filled_cells" in grid else None
+            ),
+            current_filled_cells=(
+                int(grid["current_filled_cells"]) if "current_filled_cells" in grid else None
+            ),
         )
 
     def _grid_fracs(self, lat_deg: float, lon_deg: float) -> tuple[float, float]:

@@ -120,6 +120,36 @@ MIN_CROSS_TRACK_STEP_NM = 0.5
 # stage length.
 MAX_TURN_ANGLE_DEG = 68.1986
 
+# Ticket L2: self-scaling stage spacing, the same ratio-anchoring
+# principle as CROSS_TRACK_STEP_FRACTION above but the OPPOSITE clamp
+# direction -- a floor, not a ceiling. `docs/plans/ticket-L2.md` Part 1's
+# real sensitivity sweep on the UK Plymouth<->Falmouth passage found
+# stage-spacing refinement has a *non-monotonic* relationship with detour
+# ratio (unlike cross-track spacing's clean monotonic L1 result) -- finer
+# is not better and is often infeasible outright (a real UK weather-grid
+# coverage gap, see ticket W1). DEFAULT_ALONG_TRACK_STEP_NM must therefore
+# stay a floor (`max`), guarding only against the opposite risk: a future
+# pack much *longer* than the Med would otherwise get a needlessly large,
+# expensive stage count under a fixed 6.0nm default.
+#
+# ALONG_TRACK_STEP_FRACTION := DEFAULT_ALONG_TRACK_STEP_NM /
+# <Med's real ~179.5508nm passage> = 6.0 / 179.5507750858526 =
+# 0.0334167... -- rounded DOWN (the opposite rounding direction from
+# CROSS_TRACK_STEP_FRACTION's own round-up, flagged explicitly since it's
+# easy to get backwards): a ceiling clamp (`min`) needs its raw product to
+# land a hair *above* the default so `min()` reliably returns the literal
+# default; a floor clamp (`max`) needs the opposite, a hair *below*, so
+# `max()` reliably returns the literal default. Verified directly:
+# 0.033417 (rounded up) gives 179.5507750858526 * 0.033417 = 6.000048...
+# -- `max(6.0, 6.000048) = 6.000048`, NOT bit-exact. 0.0334167 (rounded
+# down) gives 5.999994... -- `max(6.0, 5.999994) = 6.0`, exact. Verified
+# for both shipped packs (`docs/plans/ticket-L2.md` §2a): the Med
+# (179.5507750858526nm) floors to exactly 6.0; the UK pack
+# (36.742372356262734nm) would derive ~1.228nm unfloored -- squarely in
+# the sweep's infeasible zone -- but also floors to exactly 6.0, a
+# deliberate no-op for both real packs today.
+ALONG_TRACK_STEP_FRACTION = 0.0334167
+
 
 @dataclass(frozen=True)
 class RefinementDiagnostic:
@@ -330,7 +360,7 @@ def build_lattice(
     *,
     geography: Geography | None = None,
     adaptive_refinement: bool = True,
-    along_track_step_nm: float = DEFAULT_ALONG_TRACK_STEP_NM,
+    along_track_step_nm: float | None = None,
     cross_track_step_nm: float | None = None,
     cross_track_half_width_nm: float = DEFAULT_CROSS_TRACK_HALF_WIDTH_NM,
     min_navigable_edge_fraction: float = DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
@@ -369,8 +399,20 @@ def build_lattice(
     already passes, and as any future pack needing genuine Bonifacio-style
     empirical tuning still can) always wins — this is additive, not a
     behaviour change for any caller that already specifies these.
+
+    Ticket L2: `along_track_step_nm` gains the identical `None`-sentinel
+    pattern, deriving via `ALONG_TRACK_STEP_FRACTION` (see that constant's
+    own docstring) -- but as a floor, not a ceiling, since finer stage
+    spacing was found to help nowhere and often hurt (`docs/plans/ticket-L2.md`).
+    This must resolve before `lane_turn_rate_nm`'s own derivation below,
+    which reads the now-resolved `along_track_step_nm` value.
     """
     total_nm = m_to_nm(distance_m(origin, destination, ref_lat_deg))
+    if along_track_step_nm is None:
+        along_track_step_nm = max(
+            DEFAULT_ALONG_TRACK_STEP_NM,
+            total_nm * ALONG_TRACK_STEP_FRACTION,
+        )
     if cross_track_step_nm is None:
         cross_track_step_nm = max(
             MIN_CROSS_TRACK_STEP_NM,

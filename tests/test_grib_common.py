@@ -7,7 +7,10 @@ import numpy as np
 import pytest
 import xarray as xr
 
+from core.units import LatLon, distance_m, m_to_nm
 from ingest.grib_common import (
+    apply_coastal_fill,
+    coastal_fill_mask,
     direction_to_from_convention_deg,
     fetch_with_cycle_fallback,
     latest_available_cycle_utc,
@@ -263,6 +266,157 @@ def test_direction_to_from_convention_elementwise_on_array():
     arr = np.array([0.0, 90.0, 180.0])
     result = direction_to_from_convention_deg(arr, source_is_to_convention=True)
     np.testing.assert_allclose(result, [180.0, 270.0, 0.0])
+
+
+# --- Ticket W1: coastal_fill_mask / apply_coastal_fill --------------------
+
+
+class _AlwaysWaterGeography:
+    def is_land_precise(self, lat_deg: float, lon_deg: float) -> bool:
+        return False
+
+
+class _AlwaysLandGeography:
+    def is_land_precise(self, lat_deg: float, lon_deg: float) -> bool:
+        return True
+
+
+class _LonThresholdGeography:
+    """Land for lon_deg >= threshold_lon_deg -- lets a test pick exactly
+    where the threshold falls relative to a footprint's sampled offsets,
+    for an exact, hand-verified water fraction."""
+
+    def __init__(self, threshold_lon_deg: float) -> None:
+        self.threshold_lon_deg = threshold_lon_deg
+
+    def is_land_precise(self, lat_deg: float, lon_deg: float) -> bool:
+        return lon_deg >= self.threshold_lon_deg
+
+
+def test_coastal_fill_mask_true_when_footprint_is_pure_water():
+    lats = np.array([41.0, 41.25])
+    lons = np.array([9.0, 9.25])
+    mask = coastal_fill_mask(lats, lons, _AlwaysWaterGeography())
+    assert mask.all()
+
+
+def test_coastal_fill_mask_false_when_footprint_is_pure_land():
+    lats = np.array([41.0, 41.25])
+    lons = np.array([9.0, 9.25])
+    mask = coastal_fill_mask(lats, lons, _AlwaysLandGeography())
+    assert not mask.any()
+
+
+def test_coastal_fill_mask_respects_water_fraction_threshold():
+    """The cell at (41.0, 9.0) with dlat=dlon=0.25 has a footprint
+    spanning lon in [8.875, 9.125]; sampled on a 9-point grid
+    (`linspace(-0.125, 0.125, 9)`), exactly 4 of the 9 lon offsets land
+    below the threshold_lon_deg=9.0 boundary (water) and 5 land at/above
+    it -- a real, hand-verified 4/9 ~= 0.444 water fraction, independent
+    of the lat dimension since this stub's land rule ignores latitude.
+    Below the default 0.5 threshold (correctly False); above a lowered
+    0.4 threshold (correctly True) -- proves the threshold is load-
+    bearing, not a passthrough."""
+    lats = np.array([41.0, 41.25])
+    lons = np.array([9.0, 9.25])
+    geo = _LonThresholdGeography(threshold_lon_deg=9.0)
+
+    default_mask = coastal_fill_mask(lats, lons, geo)
+    assert not default_mask[0, 0]  # 0.444 < 0.5 default threshold
+
+    lowered_mask = coastal_fill_mask(lats, lons, geo, water_fraction_threshold=0.4)
+    assert lowered_mask[0, 0]  # 0.444 >= 0.4
+
+
+def test_apply_coastal_fill_copies_nearest_valid_neighbour():
+    lats = np.array([41.0])
+    lons = np.array([9.0, 9.6, 11.0])  # middle cell's nearest neighbour is the left one
+    values = np.array([[[10.0, np.nan, 999.0]]])
+    fill_mask = np.array([[True, True, True]])
+
+    filled, n_filled, n_skipped = apply_coastal_fill(
+        values, lats, lons, fill_mask, ref_lat_deg=41.0
+    )
+
+    assert filled[0, 0, 1] == 10.0  # copied from the nearer (left) neighbour, not the farther
+    assert n_filled == 1
+    assert n_skipped == 0
+    # never mutates already-real cells even though they're in fill_mask too.
+    assert filled[0, 0, 0] == 10.0
+    assert filled[0, 0, 2] == 999.0
+
+
+def test_apply_coastal_fill_never_overwrites_real_data():
+    lats = np.array([41.0])
+    lons = np.array([9.0])
+    values = np.array([[[5.0]]])
+    fill_mask = np.array([[True]])  # True, but the cell is already real data
+
+    filled, n_filled, n_skipped = apply_coastal_fill(
+        values, lats, lons, fill_mask, ref_lat_deg=41.0
+    )
+
+    assert filled[0, 0, 0] == 5.0
+    assert n_filled == 0
+    assert n_skipped == 0
+
+
+def test_apply_coastal_fill_skips_cells_not_in_fill_mask():
+    lats = np.array([41.0])
+    lons = np.array([9.0, 9.6])
+    values = np.array([[[10.0, np.nan]]])
+    fill_mask = np.array([[True, False]])  # the NaN cell is NOT eligible
+
+    filled, n_filled, n_skipped = apply_coastal_fill(
+        values, lats, lons, fill_mask, ref_lat_deg=41.0
+    )
+
+    assert np.isnan(filled[0, 0, 1])
+    assert n_filled == 0
+    assert n_skipped == 0
+
+
+def test_apply_coastal_fill_leaves_cell_untouched_beyond_max_radius():
+    """The only real (non-NaN) cell is 63.4nm away (real distance, via
+    core.units.distance_m) -- farther than the default 60.0nm max radius
+    -- so the fillable NaN cell must stay NaN and count as skipped, not
+    filled from an implausibly distant sample."""
+    lats = np.array([41.0])
+    lons = np.array([9.0, 9.6, 11.0])
+    assert m_to_nm(distance_m(LatLon(41.0, 9.6), LatLon(41.0, 11.0), 41.0)) > 60.0
+    values = np.array([[[np.nan, np.nan, 999.0]]])
+    fill_mask = np.array([[False, True, False]])
+
+    filled, n_filled, n_skipped = apply_coastal_fill(
+        values, lats, lons, fill_mask, ref_lat_deg=41.0
+    )
+
+    assert np.isnan(filled[0, 0, 1])
+    assert n_filled == 0
+    assert n_skipped == 1
+
+
+def test_apply_coastal_fill_warns_past_warn_radius_but_still_fills(caplog):
+    """Nearest valid neighbour is 45.3nm away (real distance) -- past the
+    default 30.0nm warn radius but within the 60.0nm max radius: the fill
+    still happens (the ceiling is unchanged), but a WARNING is logged
+    naming the cell and the real distance."""
+    lats = np.array([41.0])
+    lons = np.array([9.0, 9.6, 10.6])
+    d_nm = m_to_nm(distance_m(LatLon(41.0, 9.6), LatLon(41.0, 10.6), 41.0))
+    assert 30.0 < d_nm < 60.0
+    values = np.array([[[np.nan, np.nan, 999.0]]])
+    fill_mask = np.array([[False, True, False]])
+
+    with caplog.at_level(logging.WARNING):
+        filled, n_filled, n_skipped = apply_coastal_fill(
+            values, lats, lons, fill_mask, ref_lat_deg=41.0, field_name="hs_m"
+        )
+
+    assert filled[0, 0, 1] == 999.0
+    assert n_filled == 1
+    assert n_skipped == 0
+    assert any("hs_m" in r.message and "away" in r.message for r in caplog.records)
 
 
 def test_normalise_longitude_deg_no_nan_leak():

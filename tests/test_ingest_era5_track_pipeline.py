@@ -184,7 +184,13 @@ def test_short_span_does_not_log_a_warning(tmp_path, fake_cdsapi, caplog):
     with caplog.at_level(logging.WARNING, logger="ingest.fetch_era5_track"):
         era5_track.main()
 
-    assert caplog.records == []
+    # Scoped to this module's own logger, not caplog.records overall --
+    # ticket W1's coastal-fill mechanism (ingest.grib_common) can
+    # legitimately log its own, unrelated WARNING for this fixture's real
+    # western-Med geography (a masked cell filled from a real, if
+    # longer-range, neighbour); this test only asserts the large-span
+    # warning this module itself owns doesn't fire for a short span.
+    assert [r for r in caplog.records if r.name == "ingest.fetch_era5_track"] == []
 
 
 def test_build_grid_from_netcdf_handles_the_raw_non_zip_fallback(tmp_path):

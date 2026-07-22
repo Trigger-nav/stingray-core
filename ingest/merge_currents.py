@@ -184,6 +184,12 @@ def main() -> None:
     current_source = str(currents["source"]) if "source" in currents else ""
     if coverage_note:
         current_source += coverage_note
+    # Ticket W1: carried through from the currents-only npz's own ingest
+    # (computed on CMEMS's native grid, before this merge's resampling) --
+    # a provenance count, not something this merge itself recomputes.
+    current_filled_cells = (
+        int(currents["current_filled_cells"]) if "current_filled_cells" in currents else None
+    )
     # CMEMS's analysis-forecast products don't have a discrete-cycle
     # concept the way GFS/ECMWF do -- there's no equivalent "cycle" value
     # to report beyond which day's run this represents.
@@ -195,6 +201,8 @@ def main() -> None:
     fields["current_cycle"] = current_cycle
     fields["current_fetched"] = current_fetched
     fields["current_source"] = current_source
+    if current_filled_cells is not None:
+        fields["current_filled_cells"] = current_filled_cells
 
     write_npz_atomic(args.weather_npz, **fields)
     print(f"merged currents into {args.weather_npz}")
