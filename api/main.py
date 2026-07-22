@@ -80,7 +80,10 @@ def create_app(config: Settings | None = None) -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=list(config.cors_origins),
-        allow_methods=["GET", "POST"],
+        # DELETE added when the hosted demo grew favourites management (the
+        # endpoint itself shipped in ticket R1; the CORS list lagged — found
+        # live when a browser DELETE was preflight-blocked, 2026-07-22).
+        allow_methods=["GET", "POST", "DELETE"],
         allow_headers=["Authorization", "Content-Type"],
         allow_credentials=False,
     )
