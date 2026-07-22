@@ -22,6 +22,16 @@ from api.jobs import JobError, JobRecord, JobStore, QueueFullError
 from api.state import AppState, PlanJobPayload
 from core.units import LatLon
 
+# A real `optimise()` job against real geography/weather costs ~19s cold on
+# a fast dev machine (CLAUDE.md's B1 profiling gotcha: weather sampling
+# dominates, ~690k calls) -- and several times that on a 2-core CI runner.
+# The old 200 x 0.05s = 10s budget was tuned on a dev Mac and failed in CI
+# once the suite genuinely ran there (2026-07-22). Generous but still
+# bounded: a real hang/deadlock still fails the test rather than hanging
+# the job forever.
+JOB_POLL_ATTEMPTS = 600
+JOB_POLL_INTERVAL_S = 0.25
+
 # A short, real, navigable pair well clear of any coastline -- keeps every
 # real end-to-end job in this file fast (see module docstring).
 SHORT_ORIGIN = LatLon(43.0, 7.9)
@@ -88,11 +98,11 @@ def test_job_completes_with_a_real_result(app_state):
     store = JobStore(app_state.executor_holder, app_state.config)
     record = store.submit(_short_payload())
     job_id = record.job_id
-    for _ in range(200):
+    for _ in range(JOB_POLL_ATTEMPTS):
         got = store.get(job_id)
         if got.status in ("done", "failed"):
             break
-        time.sleep(0.05)
+        time.sleep(JOB_POLL_INTERVAL_S)
     assert got.status == "done", got.error
     assert got.result is not None
     assert got.result.candidates
@@ -110,11 +120,11 @@ def test_invalid_request_surfaces_as_invalid_request_error(app_state):
     store = JobStore(app_state.executor_holder, app_state.config)
     record = store.submit(_short_payload(origin=LatLon(42.3, 9.0)))
     job_id = record.job_id
-    for _ in range(200):
+    for _ in range(JOB_POLL_ATTEMPTS):
         got = store.get(job_id)
         if got.status in ("done", "failed"):
             break
-        time.sleep(0.05)
+        time.sleep(JOB_POLL_INTERVAL_S)
     assert got.status == "failed"
     assert got.error.code == "invalid_request"
     assert "not navigable" in got.error.message

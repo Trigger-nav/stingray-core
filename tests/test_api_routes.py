@@ -54,7 +54,11 @@ def _submit_short_route(client, **overrides):
     return client.post("/v1/plans", json=body, auth=AUTH)
 
 
-def _poll_until_finished(client, job_id, timeout_s=15.0):
+def _poll_until_finished(client, job_id, timeout_s=150.0):
+    # 150s, not 15s: a real optimise() job costs ~19s cold on a fast dev
+    # machine and several times that on a 2-core CI runner (see
+    # tests/test_api_jobs.py's own note and CLAUDE.md's B1 profiling
+    # gotcha). Still bounded so a genuine hang fails rather than stalls.
     deadline = time.time() + timeout_s
     while time.time() < deadline:
         r = client.get(f"/v1/plans/{job_id}", auth=AUTH)
@@ -198,7 +202,7 @@ def test_submit_plan_distill_false_round_trips_to_undistilled_result(client):
     body = {"pace": 50, "comfort": 50, "speeds_kn": [12.0], "distill": False}
     submitted = client.post("/v1/plans", json=body, auth=AUTH)
     assert submitted.status_code == 202
-    r = _poll_until_finished(client, submitted.json()["job_id"], timeout_s=30.0)
+    r = _poll_until_finished(client, submitted.json()["job_id"], timeout_s=300.0)
     result = r.json()["result"]
     assert result is not None
     api_wp_counts = sorted(len(c["track"]) for c in result["candidates"])
