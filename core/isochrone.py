@@ -24,7 +24,7 @@ import heapq
 
 from core.geography import Geography
 from core.lattice import Lattice
-from core.legs import evaluate_leg
+from core.legs import PruneStats, evaluate_leg
 from core.twin import VesselTwin
 from core.units import LatLon, kn_to_ms
 from core.weather import WeatherField
@@ -43,6 +43,7 @@ def _best_feasible_duration_h(
     engine_configs: tuple[int, ...],
     depth_exempt_points: tuple[LatLon, ...],
     ref_lat_deg: float,
+    prune_stats: PruneStats | None = None,
 ) -> float | None:
     """Fastest feasible leg duration trying every (speed, engine-config)
     combination — engine count doesn't change duration directly, but *does*
@@ -70,7 +71,10 @@ def _best_feasible_duration_h(
                 or leg.slam_event
                 or leg.overload
                 or leg.current_exceeds_stw
+                or leg.non_finite_cost
             ):
+                if leg.non_finite_cost and prune_stats is not None:
+                    prune_stats.non_finite_cost_count += 1
                 continue
             if best is None or leg.duration_h < best:
                 best = leg.duration_h
@@ -86,6 +90,7 @@ def arrival_times_within(
     engine_configs: tuple[int, ...],
     t0_h: float,
     max_hours: float,
+    prune_stats: PruneStats | None = None,
 ) -> dict[Node, float]:
     """The Dijkstra wavefront `reachable_within` is built on, exposed
     separately so a caller needing reachable sets at *multiple* horizons
@@ -142,6 +147,7 @@ def arrival_times_within(
                 engine_configs,
                 depth_exempt_points,
                 lattice.ref_lat_deg,
+                prune_stats=prune_stats,
             )
             if best_leg_duration is None:
                 continue

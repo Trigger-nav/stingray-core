@@ -67,7 +67,7 @@ from core.distill import distill_track
 from core.geography import Geography
 from core.isochrone import arrival_times_within, arrivals_within_horizon
 from core.lattice import Lattice, build_lattice
-from core.legs import evaluate_leg, leg_navigation
+from core.legs import PruneStats, evaluate_leg, leg_navigation
 from core.regionpack import MED_PACK, RegionPack, resolve_corridor
 from core.twin import VesselTwin, calm_power_kw
 from core.units import LatLon, distance_m, kn_to_ms, m_to_nm, ms_to_kn
@@ -468,6 +468,7 @@ def _lattice_search(
     time_bucket_h: float,
     use_heuristic: bool,
     lane_filter=None,
+    prune_stats: PruneStats | None = None,
 ) -> tuple[State, dict[State, _SearchNode], dict[State, tuple[State, float, int]]] | None:
     """A* (or, with `use_heuristic=False`, an equivalent exhaustive
     Dijkstra/DP sweep) over the time-expanded lattice. Returns
@@ -538,7 +539,10 @@ def _lattice_search(
                         or leg.slam_event
                         or leg.overload
                         or leg.current_exceeds_stw
+                        or leg.non_finite_cost
                     ):
+                        if leg.non_finite_cost and prune_stats is not None:
+                            prune_stats.non_finite_cost_count += 1
                         continue
                     leg_cost = (
                         weights.fuel_eur_per_kg * leg.fuel_kg
@@ -611,6 +615,7 @@ def _lattice_route_result(
     engine_configs: tuple[int, ...],
     t0_h: float,
     lane_filter=None,
+    prune_stats: PruneStats | None = None,
 ) -> dict | None:
     search = _lattice_search(
         lattice,
@@ -626,6 +631,7 @@ def _lattice_route_result(
         DEFAULT_TIME_BUCKET_H,
         use_heuristic=True,
         lane_filter=lane_filter,
+        prune_stats=prune_stats,
     )
     if search is None:
         # Fall back to an exhaustive sweep (heuristic disabled) — the
@@ -644,6 +650,7 @@ def _lattice_route_result(
             DEFAULT_TIME_BUCKET_H,
             use_heuristic=False,
             lane_filter=lane_filter,
+            prune_stats=prune_stats,
         )
     if search is None:
         return None
@@ -697,6 +704,7 @@ def _dp_route(
     weights: Weights,
     t0_h: float,
     ref_lat_deg: float = REF_LAT_DEG,
+    prune_stats: PruneStats | None = None,
 ) -> dict | None:
     depth_exempt_points = (corridor.points[0], corridor.points[-1])
     states: dict[int, dict] = {
@@ -738,6 +746,15 @@ def _dp_route(
                 if leg.slam_event or leg.overload:  # B5: hard prune, never costed
                     continue
                 if leg.current_exceeds_stw:  # C1: hard prune, never costed
+                    continue
+                # N1: hard prune, never costed -- must run before the `best
+                # is None` accept below, or a NaN cost is accepted
+                # unconditionally and then can never be replaced (a later,
+                # genuinely better finite cost loses every comparison
+                # against it too: `finite < nan` is always False).
+                if leg.non_finite_cost:
+                    if prune_stats is not None:
+                        prune_stats.non_finite_cost_count += 1
                     continue
                 cost = (
                     s["cost"]
@@ -1028,6 +1045,15 @@ def optimise(request: PlanRequest) -> PlanResult:
         request.speeds_kn if request.speeds_kn is not None else feasible_speeds_kn(request.vessel)
     )
     diagnostics = _speed_envelope_diagnostics(request.vessel, speeds_kn, engine_configs)
+    # Ticket N1: one shared counter for the whole request -- every search
+    # call below (reachability pre-pass, primary/opposite-side lattice,
+    # every corridor-DP attempt) threads this same instance through, so a
+    # non_finite_cost prune anywhere is visible to the end-of-function
+    # weather_data_gap diagnostic check. Not threaded into
+    # _baseline_route's own internal search -- that already raises a
+    # distinct, explicit RuntimeError on infeasibility; a second
+    # diagnostic mechanism there would be redundant.
+    prune_stats = PruneStats()
 
     candidates_all: list[Candidate] = []
 
@@ -1073,6 +1099,7 @@ def optimise(request: PlanRequest) -> PlanResult:
         engine_configs,
         request.departure_t0_h,
         search_horizon_h,
+        prune_stats=prune_stats,
     )
     reachable = arrivals_within_horizon(arrivals, request.departure_t0_h, horizon_h)
     baseline_reachable = (
@@ -1092,6 +1119,7 @@ def optimise(request: PlanRequest) -> PlanResult:
         speeds_kn,
         engine_configs,
         request.departure_t0_h,
+        prune_stats=prune_stats,
     )
     if primary is not None and request.distill:
         primary = _apply_distillation(
@@ -1149,6 +1177,7 @@ def optimise(request: PlanRequest) -> PlanResult:
                 engine_configs,
                 request.departure_t0_h,
                 lane_filter=opposite_filter,
+                prune_stats=prune_stats,
             )
             if secondary is not None and request.distill:
                 secondary = _apply_distillation(
@@ -1237,6 +1266,7 @@ def optimise(request: PlanRequest) -> PlanResult:
                     weights,
                     request.departure_t0_h,
                     pack.ref_lat_deg,
+                    prune_stats=prune_stats,
                 )
                 if result is None:
                     continue
@@ -1300,6 +1330,26 @@ def optimise(request: PlanRequest) -> PlanResult:
                 )
     else:
         pool = list(candidates_all)
+
+    # Ticket N1: surface a likely weather-data-gap cause when it plausibly
+    # affected the outcome -- not on every harmless non_finite_cost prune
+    # (most have an alternative route and never need surfacing). Fires on
+    # an empty pool (the direct "nothing was found" case) *or*
+    # missed_window (a data gap can prune away just the fast route while a
+    # slower, still-feasible one survives in `pool` -- that shows up as a
+    # window miss, not an empty pool, and deserves the same explanation;
+    # a review addition, not in the original scope sketch).
+    if prune_stats.non_finite_cost_count > 0 and (not pool or missed_window):
+        diagnostics.append(
+            PruneDiagnostic(
+                code="weather_data_gap",
+                message=(
+                    f"{prune_stats.non_finite_cost_count} leg(s) had unusable weather "
+                    "data (a gap in the source grid near the route) and were excluded "
+                    "from the search — this may be why no feasible route was found."
+                ),
+            )
+        )
 
     pool.sort(key=(lambda c: c.duration_h) if missed_window else (lambda c: c.score_eur))
 

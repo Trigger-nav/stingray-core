@@ -1,4 +1,5 @@
 import dataclasses
+import math
 
 import pytest
 
@@ -217,3 +218,94 @@ def test_evaluate_leg_current_exceeds_stw_prunes_leg_without_crashing(twin):
     # land/depth/wear-policy prune, just current-exceeds-STW.
     assert result.navigable is True
     assert result.depth_ok is True
+
+
+# --- Ticket N1: non-finite leg cost hard constraint ---------------------
+
+
+class _ConstantHsWeatherField:
+    """Wraps `SyntheticWeatherField("calm")`, overriding only `hs_m` to a
+    fixed, known test value -- same shape as `_ConstantCurrentWeatherField`
+    above, simulating a `GriddedWeatherField.sample()` query whose
+    interpolation stencil is fully land-masked (`bilinear_masked` returns
+    NaN when every corner is missing data, `docs/plans/ticket-N1.md`)."""
+
+    def __init__(self, hs_m: float):
+        self._inner = SyntheticWeatherField("calm")
+        self._hs_m = hs_m
+
+    def sample(self, lat_deg, lon_deg, t_h):
+        s = self._inner.sample(lat_deg, lon_deg, t_h)
+        return dataclasses.replace(s, hs_m=self._hs_m)
+
+
+def test_evaluate_leg_nan_wave_height_flags_non_finite_cost(twin):
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    deep = _StubGeography(depth_m=100.0)
+    nan_hs = _ConstantHsWeatherField(hs_m=float("nan"))
+
+    result = evaluate_leg(p, q, kn_to_ms(12), 0.0, nan_hs, deep, twin, active_engines=2)
+
+    assert result.non_finite_cost is True
+    # every other hard-constraint flag is independent -- navigable/depth_ok
+    # come from geography, not weather, and stay correctly computed.
+    assert result.navigable is True
+    assert result.depth_ok is True
+
+
+def test_evaluate_leg_finite_weather_does_not_flag_non_finite_cost(twin, calm):
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    deep = _StubGeography(depth_m=100.0)
+
+    result = evaluate_leg(p, q, kn_to_ms(12), 0.0, calm, deep, twin, active_engines=2)
+
+    assert result.non_finite_cost is False
+
+
+def test_leg_navigation_nan_current_resolves_to_infinite_duration_not_nan():
+    # The direct regression test for ticket N1's "verified against the
+    # code, not assumed" finding: a NaN current makes
+    # core.units.resolve_ground_speed_ms's own `remainder < 0` guard
+    # silently no-op (NaN < 0 is False, so the ValueError it's meant to
+    # raise never fires), and `math.sqrt(NaN)` doesn't raise either -- but
+    # leg_navigation's own `ground_speed_ms > 0` check is also False for a
+    # NaN ground speed, so duration_h falls to the `else: inf` branch.
+    # duration_h must never itself be NaN.
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    nan_current = _ConstantCurrentWeatherField(
+        current_u_ms=float("nan"), current_v_ms=float("nan")
+    )
+    nav = leg_navigation(p, q, kn_to_ms(12), 0.0, nan_current)
+
+    assert nav.duration_h == float("inf")
+    assert not math.isnan(nav.duration_h)
+    # current_exceeds_stw stays False here -- a real, secondary
+    # mislabelling (this leg's problem is missing data, not current
+    # genuinely exceeding STW) named but not fixed in ticket N1's own
+    # scope cuts; evaluate_leg's non_finite_cost still correctly excludes
+    # this leg regardless, via fuel_kg/comfort/wear/max_hs (all of which
+    # do go NaN when the twin's physics consumes NaN weather inputs).
+    assert nav.current_exceeds_stw is False
+
+
+def test_evaluate_leg_nan_current_flags_non_finite_cost_via_downstream_physics(twin):
+    # Companion to the leg_navigation-level test above: at the evaluate_leg
+    # level, a NaN current still ends up excluded -- not via
+    # current_exceeds_stw (which stays False, see above), but because
+    # duration_h=inf multiplies through fuel/comfort/wear and (depending on
+    # the twin's own rate being exactly zero at this heading/speed) can
+    # itself produce a NaN, or because the same underlying data gap
+    # typically means hs_m is NaN too in practice. This test only asserts
+    # the mechanism that's actually guaranteed: duration_h itself is
+    # +inf, never NaN, so a leg like this is never silently unrepresentable
+    # -- it's either pruned via non_finite_cost or safely deprioritised via
+    # a genuinely +inf-costed comparison, never a NaN one.
+    p, q = LatLon(41.0, 9.0), LatLon(41.0, 9.1)
+    deep = _StubGeography(depth_m=100.0)
+    nan_current = _ConstantCurrentWeatherField(
+        current_u_ms=float("nan"), current_v_ms=float("nan")
+    )
+    result = evaluate_leg(p, q, kn_to_ms(12), 0.0, nan_current, deep, twin, active_engines=2)
+
+    assert result.duration_h == float("inf")
+    assert not math.isnan(result.duration_h)

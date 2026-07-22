@@ -65,6 +65,47 @@ class LegResult:
     slam_event: bool
     overload: bool
     current_exceeds_stw: bool = False
+    # Ticket N1: a sixth hard constraint, same shape as current_exceeds_stw.
+    # A NaN cost component (from a fully-masked weather-grid stencil --
+    # GriddedWeatherField.sample()'s bilinear_masked correctly returns NaN
+    # when *every* corner of a query stencil is missing data, e.g. near a
+    # coarse-grid coastal gap) used to vanish silently from every search's
+    # own state-update comparison (`nan < x` is always False in Python) --
+    # this makes it an explicit, diagnosable prune instead. Checked via
+    # math.isnan specifically, not math.isfinite: duration_h legitimately
+    # becomes +inf under two already-correct codepaths
+    # (current_exceeds_stw's own ValueError catch, ground_speed_ms <= 0),
+    # and +inf is well-ordered under `<` -- every existing comparison
+    # already handles it correctly, so flagging it here too would be an
+    # unwanted behaviour change, not a fix. See docs/plans/ticket-N1.md.
+    non_finite_cost: bool = False
+
+
+@dataclass
+class PruneStats:
+    """Ticket N1: a cheap, shared running total of how many edges were
+    excluded specifically for `LegResult.non_finite_cost` (as opposed to
+    the five pre-existing hard constraints), across however many search
+    calls one `core.optimiser.optimise()` request makes. Lives here, not
+    in `core.optimiser`, purely to avoid a circular import --
+    `core.isochrone` already depends one-way on `core.legs` (never the
+    other way, and never on `core.optimiser`, which itself imports
+    *from* `core.isochrone`), and both `core.optimiser`'s and
+    `core.isochrone`'s search functions need to accept this same type.
+
+    Deliberately not per-search-attempt (unlike `core.optimiser`'s own
+    `PruneDiagnostic.route_side_unreachable`, which is scoped to a
+    specific failed attempt) -- a single shared counter is enough to
+    answer "did a data gap plausibly affect this request at all," which
+    is what `optimise()`'s own `weather_data_gap` diagnostic trigger
+    needs; precisely attributing *which* search attempt hit it isn't
+    worth the extra plumbing for what this ticket is trying to fix.
+    `None` (the default every pre-N1 caller/test implicitly passes,
+    unchanged) means "don't track" -- every call site guards its
+    increment with `if prune_stats is not None`, so passing nothing here
+    costs nothing and changes nothing."""
+
+    non_finite_cost_count: int = 0
 
 
 @dataclass
@@ -232,15 +273,22 @@ def evaluate_leg(
         active_engines=active_engines,
     )
 
+    duration_h = nav.duration_h
+    fuel_kg = fuel_result.fuel_kg_per_h * nav.duration_h
+    comfort = comfort_rate * nav.duration_h
+    wear = wear_result.wear_rate_per_h * nav.duration_h
+    max_hs = w.hs_m
+
     return LegResult(
-        duration_h=nav.duration_h,
-        fuel_kg=fuel_result.fuel_kg_per_h * nav.duration_h,
-        comfort=comfort_rate * nav.duration_h,
-        wear=wear_result.wear_rate_per_h * nav.duration_h,
-        max_hs=w.hs_m,
+        duration_h=duration_h,
+        fuel_kg=fuel_kg,
+        comfort=comfort,
+        wear=wear,
+        max_hs=max_hs,
         navigable=navigable,
         depth_ok=depth_ok,
         slam_event=wear_result.slam_event,
         overload=wear_result.overload,
         current_exceeds_stw=nav.current_exceeds_stw,
+        non_finite_cost=any(math.isnan(x) for x in (duration_h, fuel_kg, comfort, wear, max_hs)),
     )

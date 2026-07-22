@@ -1,11 +1,15 @@
+import dataclasses
+import math
+
 import pytest
 
-from core.corridors import PORTS, corridor_west
+from core.corridors import PORTS, Corridor, corridor_west, offset_point
 from core.geography import SyntheticGeography
 from core.optimiser import (
     SPEED_STEP_KN,
     TEST_SPEEDS_KN,
     PlanRequest,
+    PruneStats,
     _dp_route,
     _lattice_route_result,
     _max_continuous_speed_kn,
@@ -14,7 +18,7 @@ from core.optimiser import (
     optimise,
 )
 from core.twin import VesselTwin
-from core.units import kn_to_ms
+from core.units import LatLon, distance_m, interpolate_point, kn_to_ms, m_to_nm
 from core.vessel_spec import VesselSpec
 from core.weather import SyntheticWeatherField, WeatherSample
 from core.weights import combine_weights, weights_from_mission
@@ -206,3 +210,119 @@ def test_feasible_speeds_ceiling_matches_the_twin_physics(vessel):
     speeds = feasible_speeds_kn(vessel)
     assert max(speeds) <= ceiling_kn
     assert ceiling_kn - max(speeds) < SPEED_STEP_KN
+
+
+# --- Ticket N1: non-finite leg cost hard constraint ----------------------
+
+
+class _PositionalNanWeatherField:
+    """calm() everywhere except within `tolerance_nm` of `poison_point`,
+    where `hs_m` is NaN -- simulates a `GriddedWeatherField.sample()` query
+    whose interpolation stencil is fully land-masked at one specific real
+    position (`docs/plans/ticket-N1.md`), with exact control over *where*
+    for tests that need to engineer a specific search-state scenario."""
+
+    def __init__(self, poison_point, tolerance_nm: float, ref_lat_deg: float):
+        self._inner = SyntheticWeatherField("calm")
+        self._poison = poison_point
+        self._tol_nm = tolerance_nm
+        self._ref_lat_deg = ref_lat_deg
+
+    def sample(self, lat_deg, lon_deg, t_h):
+        s = self._inner.sample(lat_deg, lon_deg, t_h)
+        d_nm = m_to_nm(
+            distance_m(LatLon(lat_deg, lon_deg), self._poison, self._ref_lat_deg)
+        )
+        if d_nm <= self._tol_nm:
+            return dataclasses.replace(s, hs_m=float("nan"))
+        return s
+
+
+def test_n1_dp_route_nan_cost_edge_does_not_poison_a_dp_cell(vessel, geo):
+    """The real bug ticket N1 fixed, reproduced directly: `_dp_route`'s
+    `if best is None or cost < best["cost"]:` accepts a NaN-cost edge
+    unconditionally when it's the *first* candidate tried for a given
+    (i, k) cell, and -- unlike a merely-dropped edge -- that NaN can never
+    be replaced afterwards (`finite < nan` is always False). A funnel
+    corridor (`max_offset_steps=(0, 1, 0, 0)`) forces every downstream leg
+    through the one stage-2 cell this test poisons, so the bug (if
+    present) propagates all the way to the final returned cost, not just
+    an internal state that a later, unrelated alternative could mask.
+
+    Real, corridor_west-derived points (confirmed `SyntheticGeography`-
+    navigable, including every offset lane used) -- not arbitrary
+    coordinates, which risked silently landing on synthetic land/no-go."""
+    twin = VesselTwin(vessel)
+    weights = combine_weights(weights_from_mission(pace=50, comfort=50), vessel.wear_policy)
+    points = (
+        PORTS["antibes"],
+        LatLon(43.339999999999996, 7.386),
+        LatLon(43.129999999999995, 7.602),
+        LatLon(42.92, 7.818),
+    )
+    corridor = Corridor(
+        name="n1-funnel", side="W", points=points, max_offset_steps=(0, 1, 0, 0), offset_nm=2.0
+    )
+    stw_ms = kn_to_ms(12)
+
+    # The (stage=1, lane=-1) -> (stage=2, lane=0) edge is tried *first* for
+    # the stage-2 target lane 0 (dict insertion order from stage 1's own
+    # k=-1,0,1 construction loop) -- poison exactly its midpoint, the
+    # position `leg_navigation` actually samples weather at.
+    p_from = offset_point(corridor, 1, -1)
+    p_to = offset_point(corridor, 2, 0)
+    poison_point = interpolate_point(p_from, p_to, 0.5)
+    wx = _PositionalNanWeatherField(poison_point, tolerance_nm=0.05, ref_lat_deg=43.0)
+
+    prune_stats = PruneStats()
+    result = _dp_route(
+        corridor, stw_ms, 12, 2, wx, geo, twin, weights, 0.0, prune_stats=prune_stats
+    )
+
+    assert result is not None
+    assert not math.isnan(result["cost"])
+    assert prune_stats.non_finite_cost_count >= 1
+
+
+def test_n1_lattice_search_routes_around_a_poisoned_region(vessel, geo):
+    """`_lattice_search`'s own side of the fix: a real, previously-silent
+    non_finite_cost prune must exclude the affected edges without taking
+    down the whole search -- a route is still found, and it steers clear
+    of the poisoned area (every waypoint further than the poison
+    tolerance away), the same graceful-degradation shape every other hard
+    constraint (A5 land, B5 overload) already has."""
+    twin = VesselTwin(vessel)
+    weights = combine_weights(weights_from_mission(pace=50, comfort=50), vessel.wear_policy)
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+    tolerance_nm = 4.0
+    poison_point = lattice.point(lattice.n_stages // 2, 0)
+    wx = _PositionalNanWeatherField(poison_point, tolerance_nm=tolerance_nm, ref_lat_deg=42.3)
+
+    prune_stats = PruneStats()
+    result = _lattice_route_result(
+        lattice, None, wx, geo, twin, vessel, weights, TEST_SPEEDS_KN, (1, 2), 0.0,
+        prune_stats=prune_stats,
+    )
+
+    assert result is not None
+    assert prune_stats.non_finite_cost_count > 0
+    for point in result["track"]:
+        assert m_to_nm(distance_m(point, poison_point, 42.3)) > tolerance_nm
+
+
+def test_n1_evaluate_leg_finite_weather_leaves_prune_stats_untouched(vessel, geo):
+    """`prune_stats=None` (every pre-N1 caller/test) must cost nothing and
+    change nothing -- and an explicitly-passed `PruneStats` on a scenario
+    with no NaN weather anywhere must stay at zero, not just "not crash"."""
+    twin = VesselTwin(vessel)
+    weights = combine_weights(weights_from_mission(pace=50, comfort=50), vessel.wear_policy)
+    wx = SyntheticWeatherField("calm")
+    lattice = build_lattice(PORTS["antibes"], PORTS["portocervo"])
+
+    prune_stats = PruneStats()
+    result = _lattice_route_result(
+        lattice, None, wx, geo, twin, vessel, weights, TEST_SPEEDS_KN, (1, 2), 0.0,
+        prune_stats=prune_stats,
+    )
+    assert result is not None
+    assert prune_stats.non_finite_cost_count == 0
