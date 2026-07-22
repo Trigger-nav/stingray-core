@@ -24,6 +24,15 @@ docs_assets_system_overview.png
 # artefacts, not repo content. Run ingest/fetch_grib_nomads.py /
 # fetch_grib_ecmwf.py to produce them locally.
 data/weather/*.npz
+# ...EXCEPT the frozen Med test fixture: every api/-layer test boots
+# AppState against this exact file, and the S1/L1/L2 bit-exact Med
+# acceptance numbers depend on it never changing (it hasn't since
+# 2026-07-07). CLAUDE.md has described it as "the committed Med test
+# npz" all along — CI (a fresh clone, like the first Hetzner deploy)
+# proved it never actually was, failing 68 api tests (2026-07-22).
+# Deployments still fetch their own live weather; this file is repo
+# test data, not served forecast content.
+!data/weather/ecmwf_western_med.npz
 
 # ticket B7: per-track-driven-region geography/weather/annotated-track
 # data (data/historical/README.md has the convention) -- real historical
@@ -39,6 +48,10 @@ data/historical/*/
 # is absent -- run docs/region-pack-runbook.md's weather step to
 # regenerate it locally.
 data/region_packs/*/weather_*.npz
+# ...EXCEPT the UK fixture, same reasoning as the Med exception above —
+# committing it also un-skips tests/test_uk_sw_pack_acceptance.py in CI,
+# putting the L1/W1 detour-ratio regression guard under CI enforcement.
+!data/region_packs/uk_sw/weather_uk_sw.npz
 
 # ticket C1: the intermediate CMEMS currents-only npz
 # (data/region_packs/<pack>/currents_<pack>.npz, ingest/fetch_currents_cmems.py)
