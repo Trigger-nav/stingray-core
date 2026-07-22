@@ -837,4 +837,77 @@ fresh checkout regenerates it the same way, following
 - `api/schemas.py`, `api/routes.py` (`HealthOut` currents provenance)
 - `deploy/.env.example`, `deploy/README.md`, `docs/region-pack-runbook.md`
   (currents step + `COPERNICUSMARINE_SERVICE_USERNAME`/`_PASSWORD`)
+
+## Follow-up diagnostic: the UK dog-leg, and the A* heuristic limitation in practice (2026-07-22)
+
+**Trigger**: the §6 acceptance run's own t0=6h result (`distance_nm=48.088`
+vs t0=0h's `42.269`) showed a visibly different, longer-shaped track —
+worth checking whether §1's *deliberately deferred* A* admissibility
+limitation (a strongly favourable real current can make the heuristic
+*overestimate* remaining cost, in principle yielding a real, feasible,
+silently non-optimal candidate) was actually manifesting here, before
+deciding whether to pull that fix forward. **Diagnostic only, no `core/`
+changes** — a standalone script, not a new test or committed tool.
+
+**Method**: same `PlanRequest` (Plymouth→Falmouth, `departure_t0_h=6.0`,
+`speeds_kn=(10.0,)`, `pace=comfort=50`, the exact scenario that showed the
+dog leg) run 4 ways: (a) currents on, heuristic as shipped (production);
+(b) currents on, `_lattice_search`'s `use_heuristic` forced to `False` on
+every call (monkeypatched at the module level, so `_lattice_route_result`'s
+existing, unmodified reconstruction/leg-target logic is reused exactly —
+no duplicated route-building code); (c) currents zeroed in-memory (same
+weather npz, `current_u_ms`/`current_v_ms` replaced with zero arrays,
+everything else — wind, wave, provenance — untouched), heuristic as
+shipped; (d) currents zeroed, exhaustive forced.
+
+| config | score €eur | fuel kg | duration h | distance nm | waypoints |
+|---|---|---|---|---|---|
+| (a) currents ON, heuristic shipped | 4417.64 | 661.97 | 5.0007 | 51.366 | 7 |
+| (b) currents ON, exhaustive forced | 4417.64 | 661.97 | 5.0007 | 51.366 | 7 |
+| (c) currents OFF, heuristic shipped | 4537.58 | 679.95 | 5.1366 | 51.366 | 7 |
+| (d) currents OFF, exhaustive forced | 4537.58 | 679.95 | 5.1366 | 51.366 | 7 |
+
+Straight-line origin→destination distance: 36.742nm (detour ratio ≈1.398
+across all 4 configs).
+
+**Finding 1 — the A* admissibility gap is not manifesting in this
+scenario.** (a) and (b) are identical to the last decimal (score, fuel,
+duration, distance, and every one of the 7 waypoints, byte-for-byte); so
+are (c) and (d). The heuristic-guided search found the true optimum here,
+both with and without current — §1's deferred limitation stays a real,
+documented *theoretical* gap (the heuristic's zero-current admissibility
+assumption is still provably breakable in principle under a strongly
+favourable current), but this specific passage/departure-time doesn't
+trip it. **Not pulled forward** — no evidence of an actual optimality
+loss to fix.
+
+**Finding 2 — the dog leg is not tide-driven either.** (b) vs (d), both
+exhaustive, isolates current's real effect: 4417.64 vs 4537.58 (**-2.6%,
+current genuinely helps here** — consistent with §6's own t0=0h-vs-t0=6h
+finding that current has a real, substantial effect on this passage). But
+the *track shape* itself — same 51.366nm distance, same 1.398 detour
+ratio — is identical whether current is on or off. Current changes the
+*cost* of this route, not *whether the route takes this shape*.
+
+**Finding 3 — the dog leg is lattice-geometry shaped, not geographically
+required, at least not for most of its length.** Sampling 401 points
+along the straight origin→destination line: **every** non-navigable or
+sub-minimum-depth (<4.5m, this vessel's draft+UKC) point falls within the
+first ~9% of the line (near the Plymouth Sound approach) or the last
+~5-6% (near the Falmouth/Fal estuary approach) — the middle ~85% of the
+straight line is entirely clear, adequately deep open water (mean depth
+~42m). A detour confined to those two short port-approach stretches would
+plausibly cost a small fraction of the observed 40% distance penalty, not
+all of it. This points at `core/lattice.py`'s stage/lane construction for
+this pack (`lane_turn_rate_nm=15.0`, `min_navigable_edge_fraction=0.75`,
+`min_refinement_step_nm=0.5` — the Med's own tuned defaults, per
+`docs/region-pack-runbook.md` §7's "no principled reason to assume those
+are right for a different coastline's degradation profile" warning) as
+the next place to look, not the search/cost machinery. **Not
+investigated further in this pass** — a real, named follow-up: check
+whether the lattice's lane spacing/turn-rate constraint at this pack's
+own bbox/stage geometry is forcing an S-shaped path through open water
+that a finer or differently-tuned lattice wouldn't need, the same kind of
+finding ticket 0.8's Bonifacio adaptive-refinement fix addressed for the
+Med.
 - `pyproject.toml` (`copernicusmarine` in `ingest` extras)

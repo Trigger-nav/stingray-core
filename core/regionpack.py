@@ -38,7 +38,6 @@ from core.geography import (
 from core.lattice import (
     DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
     DEFAULT_MIN_REFINEMENT_STEP_NM,
-    LANE_TURN_RATE_NM,
 )
 from core.units import LatLon
 
@@ -62,14 +61,24 @@ class RegionPack:
     ports: dict[str, LatLon] = field(default_factory=dict)
     default_origin: LatLon | None = None
     default_destination: LatLon | None = None
-    # Med-tuned lattice search knobs -- pack-overridable, Med-value
-    # defaults (CLAUDE.md's Bonifacio gotcha has the full empirical-tuning
-    # story; there's no principled reason these are right for a different
-    # coastline's degradation profile, but no invented UK-specific number
-    # either -- new packs start from the same values and any infeasibility
-    # that surfaces is a reportable finding, not something to silently
-    # tune away).
-    lane_turn_rate_nm: float = LANE_TURN_RATE_NM
+    # Med-tuned lattice search knobs -- pack-overridable. `min_navigable_edge_fraction`/
+    # `min_refinement_step_nm` (ticket 0.8's adaptive-refinement knobs)
+    # default to the Med's own tuned values (CLAUDE.md's Bonifacio gotcha
+    # has the full empirical-tuning story; there's no principled reason
+    # these are right for a different coastline's degradation profile, but
+    # no invented UK-specific number either -- new packs start from the
+    # same values and any infeasibility that surfaces is a reportable
+    # finding, not something to silently tune away).
+    #
+    # `lane_turn_rate_nm: None` (ticket L1) -- unlike the two above, this
+    # is *not* a Med-value default a new pack silently inherits: `None`
+    # means "derive from this pack's own passage geometry"
+    # (`core.lattice.build_lattice`'s own docstring has the formula and
+    # the empirical grounding, `docs/plans/ticket-L1.md`). Still a real
+    # override -- a pack whose coastline genuinely needs Bonifacio-style
+    # empirical tuning can still set an explicit nm value here, the same
+    # escape hatch R1 already established for the other two knobs.
+    lane_turn_rate_nm: float | None = None
     min_navigable_edge_fraction: float = DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION
     min_refinement_step_nm: float = DEFAULT_MIN_REFINEMENT_STEP_NM
     # Empty for every pack except "med" -- hand-drawn corridors are
@@ -119,7 +128,7 @@ class RegionPack:
             ports=ports,
             default_origin=_latlon(raw.get("default_origin")),
             default_destination=_latlon(raw.get("default_destination")),
-            lane_turn_rate_nm=raw.get("lane_turn_rate_nm", LANE_TURN_RATE_NM),
+            lane_turn_rate_nm=raw.get("lane_turn_rate_nm"),
             min_navigable_edge_fraction=raw.get(
                 "min_navigable_edge_fraction", DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION
             ),
@@ -197,7 +206,6 @@ MED_PACK = RegionPack(
     ports=PORTS,
     default_origin=PORTS["antibes"],
     default_destination=PORTS["portocervo"],
-    lane_turn_rate_nm=LANE_TURN_RATE_NM,
     min_navigable_edge_fraction=DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
     min_refinement_step_nm=DEFAULT_MIN_REFINEMENT_STEP_NM,
     legacy_corridors=(

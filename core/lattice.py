@@ -65,6 +65,61 @@ DEFAULT_MAX_REFINEMENT_PASSES = 3
 DEFAULT_MIN_REFINEMENT_STEP_NM = 0.5
 REFINEMENT_STEP_FACTOR = 4.0
 
+# Ticket L1: self-scaling lattice geometry. `DEFAULT_CROSS_TRACK_STEP_NM`
+# (5.0nm) and `LANE_TURN_RATE_NM` (15.0nm) above are both real, but
+# absolute-distance Bonifacio-era tuning against the Med's own ~180nm
+# Antibes<->Porto Cervo passage -- neither has a principled reason to be
+# right for a passage of very different length (ticket R1 §1 named this
+# risk explicitly; `docs/plans/ticket-C1.md`'s UK dog-leg diagnostic and
+# `docs/plans/ticket-L1.md`'s own empirical follow-up confirmed it: a
+# fixed 5nm lane grid on a 36.7nm passage is far too coarse, forcing a
+# 40%-longer detour to express a lateral position the grid can only round
+# to the nearest 5nm). `build_lattice`'s `cross_track_step_nm`/
+# `lane_turn_rate_nm` parameters derive from these two ratios (below) when
+# the caller passes `None` (the new default) instead of an explicit
+# value -- both ratios are computed *from* the Med's own real numbers, so
+# applying either formula back to the Med's own ~179.55nm passage
+# reproduces `DEFAULT_CROSS_TRACK_STEP_NM`/`LANE_TURN_RATE_NM` exactly,
+# not approximately (`docs/plans/ticket-L1.md` §2a/§2b has the full
+# algebra and the real sensitivity-sweep data these ratios are grounded
+# in -- `lane_turn_rate_nm` in particular was found to have *zero*
+# measured effect on the UK dog-leg; it's self-scaled here on principle,
+# not because it was the mechanism).
+
+# Fraction of straight-line passage length that reproduces today's
+# DEFAULT_CROSS_TRACK_STEP_NM on the Med's own real ~179.5508nm passage:
+# 5.0 / 179.5507750858526 = 0.0278473 (verified directly, not
+# hand-computed). A short passage gets proportionally finer lane spacing;
+# DEFAULT_CROSS_TRACK_STEP_NM remains the ceiling (a passage at or longer
+# than Med-scale is unaffected). Deliberately rounded slightly *up* from
+# that exact ratio (0.027848, not 0.027847) so that `total_nm *
+# CROSS_TRACK_STEP_FRACTION` for the Med's own real passage evaluates to
+# a hair above DEFAULT_CROSS_TRACK_STEP_NM, not a hair below -- verified
+# directly: 0.027847 lands at 4.99995 (a hair *under* the ceiling, which
+# would silently produce a non-default value the ceiling clamp was
+# supposed to prevent), 0.027848 lands at 5.00013. `build_lattice`'s
+# `min(computed, DEFAULT_CROSS_TRACK_STEP_NM)` ceiling clamp then returns
+# the literal `DEFAULT_CROSS_TRACK_STEP_NM` value exactly regardless of
+# which side of 5.0 the raw product lands on, but only the "hair above"
+# case is the intended, checked one.
+CROSS_TRACK_STEP_FRACTION = 0.027848
+
+# Floor for the derived cross_track_step_nm, so a pathologically short
+# future passage (a harbour-to-anchorage hop) doesn't get an absurdly
+# fine, expensive lane grid. Reuses DEFAULT_MIN_REFINEMENT_STEP_NM's own
+# already-precedented 0.5nm value rather than inventing a new one.
+MIN_CROSS_TRACK_STEP_NM = 0.5
+
+# Maximum per-stage course-deviation angle that reproduces today's
+# LANE_TURN_RATE_NM at the Med's own DEFAULT_ALONG_TRACK_STEP_NM stage
+# length: atan(15.0 / 6.0) = 68.1986 degrees -- a deliberately generous
+# angle (LANE_TURN_RATE_NM's own comment already frames it as "not a
+# vessel kinematic limit"), expressed as an angle rather than a fixed nm
+# value because an angle is stage-length-invariant by construction; a
+# fixed nm value only means what it was tuned to mean at one specific
+# stage length.
+MAX_TURN_ANGLE_DEG = 68.1986
+
 
 @dataclass(frozen=True)
 class RefinementDiagnostic:
@@ -276,14 +331,14 @@ def build_lattice(
     geography: Geography | None = None,
     adaptive_refinement: bool = True,
     along_track_step_nm: float = DEFAULT_ALONG_TRACK_STEP_NM,
-    cross_track_step_nm: float = DEFAULT_CROSS_TRACK_STEP_NM,
+    cross_track_step_nm: float | None = None,
     cross_track_half_width_nm: float = DEFAULT_CROSS_TRACK_HALF_WIDTH_NM,
     min_navigable_edge_fraction: float = DEFAULT_MIN_NAVIGABLE_EDGE_FRACTION,
     max_refinement_passes: int = DEFAULT_MAX_REFINEMENT_PASSES,
     min_refinement_step_nm: float = DEFAULT_MIN_REFINEMENT_STEP_NM,
     ref_lat_deg: float = REF_LAT_DEG,
     bbox: tuple[float, float, float, float] = OPERATING_AREA_BBOX,
-    lane_turn_rate_nm: float = LANE_TURN_RATE_NM,
+    lane_turn_rate_nm: float | None = None,
 ) -> Lattice:
     """Build the open lattice, clipping the requested half-width down to
     whatever actually stays inside `OPERATING_AREA_BBOX` (with margin) at
@@ -305,8 +360,32 @@ def build_lattice(
     `Lattice.refinement_diagnostics`, not silently accepted (amendment 2)
     — the search itself already handles a genuinely-impassable region by
     finding no path there, same as it always has for any hazard.
+
+    Ticket L1: `cross_track_step_nm`/`lane_turn_rate_nm` default to `None`
+    ("derive from passage geometry") rather than a fixed constant — the
+    module docstring above `CROSS_TRACK_STEP_FRACTION`/`MAX_TURN_ANGLE_DEG`
+    has the full derivation and the empirical grounding
+    (`docs/plans/ticket-L1.md`). An explicit value (as every pre-L1 caller
+    already passes, and as any future pack needing genuine Bonifacio-style
+    empirical tuning still can) always wins — this is additive, not a
+    behaviour change for any caller that already specifies these.
     """
     total_nm = m_to_nm(distance_m(origin, destination, ref_lat_deg))
+    if cross_track_step_nm is None:
+        cross_track_step_nm = max(
+            MIN_CROSS_TRACK_STEP_NM,
+            min(total_nm * CROSS_TRACK_STEP_FRACTION, DEFAULT_CROSS_TRACK_STEP_NM),
+        )
+    if lane_turn_rate_nm is None:
+        # Bit-exact at the Med's own stage length, not merely close --
+        # avoids a tan(radians(...)) round-trip's inherent floating-point
+        # noise (~1e-5nm) for the one case (along_track_step_nm unchanged)
+        # every shipped pack actually hits today.
+        lane_turn_rate_nm = (
+            LANE_TURN_RATE_NM
+            if along_track_step_nm == DEFAULT_ALONG_TRACK_STEP_NM
+            else along_track_step_nm * math.tan(math.radians(MAX_TURN_ANGLE_DEG))
+        )
     n_stages = max(2, round(total_nm / along_track_step_nm) + 1)
     stage_centres = tuple(
         interpolate_point(origin, destination, i / (n_stages - 1)) for i in range(n_stages)

@@ -1194,7 +1194,7 @@ def optimise(request: PlanRequest) -> PlanResult:
                         message=(
                             f"No feasible {missing_side}-side route found at the current "
                             f"lattice resolution (cross-track step {step_range}, "
-                            f"+-{pack.lane_turn_rate_nm:.0f}nm/stage turn allowance) — see "
+                            f"+-{lattice.lane_turn_rate_nm:.0f}nm/stage turn allowance) — see "
                             f"ROADMAP.md ticket 0.8."
                         ),
                         side=missing_side,

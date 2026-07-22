@@ -89,7 +89,8 @@ default_origin:
 default_destination:
 - 50.13
 - -5.046666666666666
-lane_turn_rate_nm: 15.0
+# lane_turn_rate_nm: omitted (ticket L1) -- derived from this pack's own
+# passage geometry, same as the Med pack; see med.yaml's own comment.
 min_navigable_edge_fraction: 0.75
 min_refinement_step_nm: 0.5
 legacy_corridors: []

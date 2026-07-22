@@ -25,6 +25,7 @@ import pytest
 from core.geography import OPERATING_AREA_BBOX, RealGeography
 from core.optimiser import PlanRequest, optimise
 from core.regionpack import RegionPack
+from core.units import distance_m, m_to_nm
 from core.vessel_spec import VesselSpec
 from core.weather import GriddedWeatherField
 
@@ -88,3 +89,47 @@ def test_uk_sw_pack_produces_a_feasible_plan_end_to_end(uk_sw_pack):
         # "W" (the exact bug this ticket found and fixed).
         assert c.side is None
     assert result.baseline.duration_h > 0
+
+
+def test_uk_sw_pack_detour_ratio_stays_reasonable(uk_sw_pack):
+    """Ticket L1: a regression guard against the dog-leg
+    `docs/plans/ticket-C1.md`'s own diagnostic found (detour ratio 1.398
+    on this exact origin/destination pair) reappearing -- L1's derived
+    lane spacing (`core/lattice.py`'s `CROSS_TRACK_STEP_FRACTION`) brought
+    the real measured ratio down to ~1.10 (`docs/plans/ticket-L1.md`'s own
+    acceptance run). 1.30 is deliberately generous, not the tight
+    measured value -- weather (hence current, hence which candidate speed/
+    route the search settles on) varies with whatever the locally
+    regenerated `weather_uk_sw.npz` happens to hold when this test runs
+    (gitignored, goes stale, per this file's own module docstring), so a
+    tight assertion would be flaky by design; this only guards against the
+    lattice-geometry regression actually found, not against ordinary
+    weather-driven variation."""
+    geography = RealGeography.from_pack(uk_sw_pack)
+    weather = GriddedWeatherField.from_npz(uk_sw_pack.weather_npz_path)
+    vessel = VesselSpec.from_yaml("data/vessel_specs/mys_50m_default.yaml")
+
+    request = PlanRequest(
+        weather=weather,
+        geography=geography,
+        vessel=vessel,
+        pace=50,
+        comfort=50,
+        origin=uk_sw_pack.default_origin,
+        destination=uk_sw_pack.default_destination,
+        region_pack=uk_sw_pack,
+    )
+    result = optimise(request)
+
+    straight_nm = m_to_nm(
+        distance_m(
+            uk_sw_pack.default_origin, uk_sw_pack.default_destination, uk_sw_pack.ref_lat_deg
+        )
+    )
+    assert result.candidates
+    for c in result.candidates:
+        detour_ratio = c.distance_nm / straight_nm
+        assert detour_ratio < 1.30, (
+            f"candidate {c.corridor_name!r} detour_ratio={detour_ratio:.4f} "
+            f"(distance_nm={c.distance_nm:.2f}, straight_nm={straight_nm:.2f})"
+        )

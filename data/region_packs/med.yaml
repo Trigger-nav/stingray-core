@@ -27,7 +27,9 @@ default_destination: [41.13, 9.55]
 
 # Bonifacio/CLAUDE.md-tuned lattice search knobs -- core.lattice's own
 # defaults, restated here as pack data per R1's engineering rule.
-lane_turn_rate_nm: 15.0
+# lane_turn_rate_nm: omitted (ticket L1) -- derived from this pack's own
+# passage geometry (core.lattice.build_lattice's own docstring has the
+# formula); explicitly NOT set here, the "derive, don't tune" proof.
 min_navigable_edge_fraction: 0.75
 min_refinement_step_nm: 0.5
 
