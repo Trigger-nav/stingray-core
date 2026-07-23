@@ -216,22 +216,28 @@ on the first `optimise()` attempt.
 
 Both `FEASIBLE`, `missed_window=False`, zero diagnostics.
 
-**A real, separate performance finding**: the *same* Antibes↔Porto Cervo
-passage costs **24.4s** through `med_full`'s pack vs. **~6s** through the
-existing, much-smaller `med` pack (this session's own earlier L2
-acceptance run). Both use the same weather-sampling/lattice-search
-machinery (B1's own profiling gotcha still holds: weather sampling
-dominates raw `optimise()` cost) — the plausible new factor is
-`core.geography.RealGeography.is_land_precise`/`is_navigable`, which
-scans **every** loaded GSHHG polygon per call (`any(_point_in_polygon(...)
-for poly in self._land_polygons)`) — `med_full` loads 3,340 polygons vs.
-the small `med` pack's much smaller committed set. Not profiled further
-this ticket (would be new engineering) — named as a real, measured VM/
-performance-implication finding, not a guess: a full-basin-scale pack's
-per-point geography checks are real work multiplied across every leg
-evaluation in the search, and this cost scales with polygon *count*, not
-bbox area — worth remembering if a future ticket ever needs to speed up
-adaptive-refinement-heavy searches on a large pack.
+**A performance observation, correction added post-hoc (ticket G1)**: the
+*same* Antibes↔Porto Cervo passage costs **24.4s** through `med_full`'s
+pack vs. **~6s** through the existing, much-smaller `med` pack (this
+session's own earlier L2 acceptance run). At the time this was
+speculatively attributed to `core.geography.RealGeography.is_land_precise`/
+`is_navigable` scanning every loaded GSHHG polygon per call — `med_full`
+loads 3,340 polygons vs. the small `med` pack's much smaller committed
+set — and named as unverified, "not profiled further this ticket."
+**Ticket G1 profiled it for real and found this guess was wrong**: (1)
+`is_land_precise` is never called during `optimise()` at all (only from
+ingest-time `mask_land_as_missing`/`coastal_fill_mask`, and `is_land`'s
+own fallback when `land_mask is None`, which is not the case for any
+shipped pack); `is_navigable` already takes its intended O(1) rasterised
+fast path and costs ~3% of total runtime in a real `cProfile` run —
+weather sampling is still ~85%+, exactly matching the pre-existing B1
+gotcha. (2) The 24.4s-vs-6s comparison itself was never controlled for
+`speeds_kn` grid size (11 speeds vs. 2 in the two commands that produced
+these numbers) — re-run controlled at both grid sizes, `med_full` is not
+slower than the small `med` pack for the identical passage (if anything
+faster: 15.33s vs. 20.76s at the default 11-speed grid). The real cause
+was a methodology confound in how these two numbers were generated, not
+a pack-size or polygon-count effect. Full trace: `docs/plans/ticket-G1.md`.
 
 **Lattice derivation values — the "self-scaling formulas work unaided"
 proof point, now at two more real scales:**

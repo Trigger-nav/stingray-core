@@ -1,6 +1,18 @@
 [Unit]
 Description=Stingray planner service
 After=network.target
+# Ticket D1: bounds a hard-failing binary to a handful of restart
+# attempts (5 within 30s, matching RestartSec=5 below) instead of
+# retrying forever -- a real incident (2026-07-22) hit ~960 restarts
+# over ~80 minutes with no limit set, each leaking a partial PyInstaller
+# extraction dir until /tmp filled and every subsequent start failed too,
+# regardless of the original cause. Once tripped, this unit lands in
+# `failed` (visible via `systemctl status`) and stays there -- it does
+# NOT auto-recover even once the underlying cause clears; a human must
+# `systemctl reset-failed stingray-planner` before it will start again
+# (see deploy/README.md's runbook entry for the manual recovery).
+StartLimitIntervalSec=30
+StartLimitBurst=5
 
 [Service]
 Type=simple
@@ -9,6 +21,24 @@ ExecStart=/opt/stingray/stingray planner
 WorkingDirectory=/opt/stingray
 Restart=on-failure
 RestartSec=5
+
+# Ticket D1: PyInstaller's onefile bootloader resolves its extraction
+# root the same way Python's own tempfile.gettempdir() does (TMPDIR env
+# var first, POSIX-standard) -- redirecting it to real disk under
+# /opt/stingray, not tmpfs, means a repeat of the 2026-07-22 incident
+# leaks onto disk (larger, more commonly monitored) instead of
+# memory-backed /tmp. install.sh creates this directory.
+Environment=TMPDIR=/opt/stingray/tmp
+
+# Ticket D1: clears any _MEI* extraction dirs abandoned by a crashed
+# (not cleanly-exited) previous run. Age-bounded (-mmin +5), not
+# unconditional -- systemd's own unit lifecycle already guarantees no
+# instance of *this* unit is active when ExecStartPre runs, but the age
+# bound is cheap extra margin against a manually-invoked instance of the
+# binary running outside systemd entirely. Deliberately a literal path
+# here, not a variable/templated value, so a later refactor can't
+# silently widen what this deletes.
+ExecStartPre=/usr/bin/find /opt/stingray/tmp -maxdepth 1 -name '_MEI*' -mmin +5 -exec rm -rf {} +
 
 [Install]
 WantedBy=multi-user.target

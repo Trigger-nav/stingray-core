@@ -456,6 +456,39 @@ stat -c '%y' /opt/stingray/stingray   # should be ~now
 curl -u <user>:<password> http://127.0.0.1:8000/v1/health
 ```
 
+### Troubleshooting: `stingray-planner` crash-looping / stuck in `failed`
+
+Real incident, 2026-07-22 (ticket D1): the onefile binary failed to
+extract one of its bundled files ("decompression resulted in return code
+-1" or similar in `journalctl`) — root cause not always establishable
+after the fact (a truncated/corrupt binary from a build that ran
+concurrently with heavy disk I/O is one real, plausible cause, not the
+only one). Before D1, `Restart=on-failure` had no restart-limit set, so
+systemd retried forever; PyInstaller's onefile bootloader leaves a
+partial extraction directory (`_MEI*`) behind on every crashed (not
+cleanly-exited) start, and enough of those can fill the extraction
+directory's filesystem, which then makes *every* subsequent start fail
+too, regardless of the original cause. D1 bounds this (`StartLimitBurst=5`/
+`StartLimitIntervalSec=30`, `TMPDIR` moved off tmpfs onto `/opt/stingray/tmp`,
+an age-bounded cleanup on every start) so a repeat lands in a visible
+`failed` state within seconds, not an invisible multi-hour spiral — but
+`failed` still needs a human to clear it:
+
+```
+systemctl status stingray-planner       # confirm it's in `failed`, not just slow to start
+journalctl -u stingray-planner -n 50    # see the actual extraction/crash error
+rm -rf /opt/stingray/tmp/_MEI*          # clear any leaked partial extractions
+systemctl reset-failed stingray-planner # clear the tripped start-limit -- systemd will
+                                         # NOT retry on its own even once the cause clears
+systemctl start stingray-planner
+systemctl status stingray-planner       # confirm it's actually serving, not just restarted
+```
+
+If this recurs, the *original* trigger is still worth investigating
+separately (D1 deliberately treats the symptom, not the cause) — check
+whether a build ran concurrently with unrelated heavy I/O (a weather
+fetch, another build) and consider rebuilding from a clean checkout.
+
 ## Manual verification checklist (pending, needs real hardware/deployment)
 
 - [x] Real trial build on macOS/arm64 — planner + capture subcommands

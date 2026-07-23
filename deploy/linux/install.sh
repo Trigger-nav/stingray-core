@@ -26,6 +26,9 @@ if systemctl is-active --quiet stingray-planner 2>/dev/null; then
 fi
 
 mkdir -p "${INSTALL_DIR}/data"
+# Ticket D1: PyInstaller onefile extraction root, real disk not tmpfs --
+# see stingray-planner.service's own Environment=TMPDIR= comment for why.
+mkdir -p "${INSTALL_DIR}/tmp"
 # Not a plain `cp` onto ${INSTALL_DIR}/stingray -- found live during a
 # real Hetzner binary upgrade (2026-07-13, finding #4): overwriting a
 # *running* executable in place fails with "Text file busy" (ETXTBSY) on
@@ -95,6 +98,47 @@ if [ "${WAS_ACTIVE}" = true ]; then
   echo "stingray-planner was already running -- restarting to pick up the new binary"
   systemctl restart stingray-planner
 fi
+
+# Ticket D1: `systemctl enable --now`/`restart` above only confirm the
+# process was *launched*, not that it didn't immediately crash-loop (the
+# same "deceptively successful install" shape as the 2026-07-13 binary-
+# upgrade finding, CLAUDE.md -- applied here to onefile extraction
+# failures instead of a stale binary). Poll the real health endpoint
+# before declaring success.
+#
+# Credentials are read from .env into a short-lived curl config file
+# (`-K`), never passed on the command line -- a `-u user:pass` argument
+# is visible to any local user via `ps`, and would also leak into any
+# shell trace (`bash -x`) or a future `set -x` added to this script.
+# Nothing below echoes the config file's path or contents, or the
+# credentials themselves; the only diagnostic printed on failure is
+# `journalctl`'s own output, which reflects the service's logs, not this
+# script's variables.
+# shellcheck source=/dev/null
+source "${INSTALL_DIR}/.env"
+
+CURL_CFG="$(mktemp)"
+chmod 600 "${CURL_CFG}"
+trap 'rm -f "${CURL_CFG}"' EXIT
+printf 'user = "%s:%s"\n' "${STINGRAY_API_USER}" "${STINGRAY_API_PASSWORD}" > "${CURL_CFG}"
+
+set +e
+HEALTH_OK=false
+for _ in $(seq 1 30); do
+  if curl -sf -K "${CURL_CFG}" "http://127.0.0.1:${STINGRAY_PORT:-8000}/v1/health" >/dev/null 2>&1; then
+    HEALTH_OK=true
+    break
+  fi
+  sleep 1
+done
+set -e
+
+if [ "${HEALTH_OK}" != true ]; then
+  echo "ERROR: stingray-planner did not report healthy within 30s -- last logs:" >&2
+  journalctl -u stingray-planner --no-pager -n 20 >&2
+  exit 1
+fi
+echo "stingray-planner is healthy."
 
 if [ "${ROLE}" = "vessel" ]; then
   cp "${SCRIPT_DIR}/stingray-capture.service" /etc/systemd/system/
