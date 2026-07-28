@@ -5,7 +5,14 @@ on:
   pull_request:
 
 jobs:
-  test:
+  # Runs on every push and pull_request -- fast feedback (~30s test run,
+  # excludes @pytest.mark.slow via pyproject.toml's own `addopts`). Still
+  # needs the full extras + eccodes install below: `addopts = "-m 'not
+  # slow'"` is a marker filter applied *after* collection, so every test
+  # file (including ingest/fit-marked ones) is still imported regardless
+  # of which tests actually run -- CI hit exactly this as a real failure
+  # once already (see the Install step's own comment).
+  fast:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -19,14 +26,32 @@ jobs:
         # runners use the same package.
         run: sudo apt-get update && sudo apt-get install -y libeccodes-dev
       - name: Install
-        # ALL extras: CLAUDE.md's convention says `pytest -m ""` full-suite
-        # is "what CI runs" -- which requires the ingest/fit dependency
-        # sets too. The previous api/capture-only install left every
+        # ALL extras: even the fast (slow-excluded) run still *collects*
+        # every test file, which requires the ingest/fit dependency sets
+        # too. The previous api/capture-only install left every
         # tests/test_ingest_*.py file erroring at collection (xarray etc.
         # missing) from ticket B7 onward -- CI was failing on import
         # errors, not real test failures (fixed 2026-07-22).
         run: pip install -e ".[dev,api,capture,ingest,fit]"
       - name: Lint
         run: ruff check .
+      - name: Test (fast suite, excludes @pytest.mark.slow)
+        run: pytest
+
+  # Only on a push to main -- the slow (RealGeography-heavy, multi-minute)
+  # suite doesn't need to gate every branch push/PR, but main itself
+  # should never merge without full coverage having run against it.
+  full:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install system eccodes (cfgrib's C library)
+        run: sudo apt-get update && sudo apt-get install -y libeccodes-dev
+      - name: Install
+        run: pip install -e ".[dev,api,capture,ingest,fit]"
       - name: Test (full suite, incl. slow)
         run: pytest -m ""

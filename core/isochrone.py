@@ -120,7 +120,28 @@ def arrival_times_within(
 
     Returns each reached node's earliest absolute arrival time (t0_h-
     relative), not collapsed to a boolean "reached at all" the way
-    `reachable_within` returns."""
+    `reachable_within` returns.
+
+    **An assumption this relies on, not verified or enforced anywhere in
+    code: the FIFO property.** Both this function's own Dijkstra-style
+    label-setting correctness *and* the shared-search argument above it
+    depend on leg durations being FIFO-consistent with respect to
+    departure time -- departing a given node later must never produce an
+    *earlier* arrival at the next node than departing earlier would (a
+    time-dependent-network analogue of "waiting never helps"). If that
+    ever failed for some leg (e.g. a shift in wind/current made a later
+    departure cut that leg's duration enough to overtake an earlier
+    one), a Dijkstra-style search settling nodes in arrival-time order
+    could settle a suboptimal path before a better, later-departing
+    alternative is even considered -- independent of, and not covered
+    by, the `max_hours1`/`max_hours2` superset argument above, which
+    itself implicitly leans on the same property (that a node's earliest
+    arrival time is well-defined and stable regardless of how generous
+    the deadline is). This repo's weather updates on an hourly-to-3-
+    hourly cadence -- coarse relative to typical leg durations -- so a
+    large violation is not expected in practice, but this is an
+    empirical expectation about the data, not a property this function
+    (or its caller) actually checks."""
     depth_exempt_points = (lattice.origin, lattice.destination)
     start: Node = (0, 0)
     best_arrival: dict[Node, float] = {start: t0_h}

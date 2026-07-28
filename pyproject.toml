@@ -16,9 +16,13 @@ dependencies = [
 dev = [
     "pytest>=8",
     "ruff>=0.6",
-    # FastAPI's TestClient (tests/test_api_routes.py etc., ticket B1)
-    # requires httpx even though api/ itself never imports it directly.
-    "httpx>=0.28",
+    # FastAPI's TestClient (tests/test_api_routes.py etc., ticket B1) wraps
+    # starlette.testclient.TestClient, which prefers httpx2 over httpx
+    # (falls back to httpx with a StarletteDeprecationWarning otherwise --
+    # confirmed live, 2026-07-28: httpx2 is the real, actively-versioned
+    # package starlette's own testclient.py source names as the
+    # replacement, not a guess).
+    "httpx2>=2.9",
 ]
 # Ingest-only: one-time data preprocessing (GSHHG shapefile parsing/clipping,
 # GEBCO remote netCDF subsetting, GRIB2 weather parsing). core/ stays at
